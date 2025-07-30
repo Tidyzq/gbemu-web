@@ -137,10 +137,10 @@ impl<'a> CpuContext<'a> {
             Register::H => DataKind::D8(self.registers.h),
             Register::L => DataKind::D8(self.registers.l),
 
-            Register::AF => DataKind::D16(concat_u16!(self.registers.f, self.registers.a)),
-            Register::BC => DataKind::D16(concat_u16!(self.registers.c, self.registers.b)),
-            Register::DE => DataKind::D16(concat_u16!(self.registers.e, self.registers.d)),
-            Register::HL => DataKind::D16(concat_u16!(self.registers.l, self.registers.h)),
+            Register::AF => DataKind::D16(concat_u16!(self.registers.a, self.registers.f)),
+            Register::BC => DataKind::D16(concat_u16!(self.registers.b, self.registers.c)),
+            Register::DE => DataKind::D16(concat_u16!(self.registers.d, self.registers.e)),
+            Register::HL => DataKind::D16(concat_u16!(self.registers.h, self.registers.l)),
 
             Register::PC => DataKind::D16(self.registers.pc),
             Register::SP => DataKind::D16(self.registers.sp),
@@ -164,10 +164,10 @@ impl<'a> CpuContext<'a> {
             Register::H => self.registers.h = value as u8,
             Register::L => self.registers.l = value as u8,
 
-            Register::AF => split!(self.registers.f, self.registers.a, value),
-            Register::BC => split!(self.registers.c, self.registers.b, value),
-            Register::DE => split!(self.registers.e, self.registers.d, value),
-            Register::HL => split!(self.registers.l, self.registers.h, value),
+            Register::AF => split!(self.registers.a, self.registers.f, value),
+            Register::BC => split!(self.registers.b, self.registers.c, value),
+            Register::DE => split!(self.registers.d, self.registers.e, value),
+            Register::HL => split!(self.registers.h, self.registers.l, value),
 
             Register::PC => self.registers.pc = value,
             Register::SP => self.registers.sp = value,
@@ -210,15 +210,15 @@ impl<'a> CpuContext<'a> {
 
     pub fn stack_push(&mut self, data: u8) {
         self.registers.sp -= 1;
-        self.bus.write(self.registers.pc, data);
+        self.bus.write(self.registers.sp, data);
     }
     pub fn stack_push_16(&mut self, data: u16) {
         self.stack_push(((data >> 8) & 0xFF) as u8);
         self.stack_push((data & 0xFF) as u8);
     }
     pub fn stack_pop(&mut self) -> u8 {
-        let data = self.bus.read(self.registers.pc);
-        self.registers.pc += 1;
+        let data = self.bus.read(self.registers.sp);
+        self.registers.sp += 1;
         data
     }
     pub fn stack_pop_16(&mut self) -> u16 {
@@ -375,11 +375,7 @@ impl<'a> CpuContext<'a> {
                 );
             }
             Instruction::RET(condition) => {
-                goto_addr!(
-                    condition,
-                    self.stack_pop_16(),
-                    false
-                );
+                goto_addr!(condition, self.stack_pop_16(), false);
             }
             Instruction::LD(left_mode, right_mode) => {
                 let left = self.fetch_left_data(left_mode);
