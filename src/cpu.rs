@@ -345,13 +345,50 @@ impl<'a> CpuContext<'a> {
             }};
         }
 
+        macro_rules! get_flag {
+            (z) => {
+                self.registers.f & (1 << 7) != 0
+            };
+            (n) => {
+                self.registers.f & (1 << 6) != 0
+            };
+            (h) => {
+                self.registers.f & (1 << 5) != 0
+            };
+            (c) => {
+                self.registers.f & (1 << 4) != 0
+            };
+        }
+
         match instruction {
-            Instruction::NOP => {
-                // do nothing
+            /* Miscellaneous instructions */
+            Instruction::NOP => {}
+            Instruction::DAA => {
+                let mut u: u8 = 0;
+                let mut fc = false;
+
+                if get_flag!(h) || (!get_flag!(n) && (self.registers.a & 0xf) > 9) {
+                    u = 6;
+                }
+                if get_flag!(h) || (!get_flag!(n) && self.registers.a > 0x99) {
+                    u |= 0x60;
+                    fc = true;
+                }
+
+                if get_flag!(n) {
+                    self.registers.a -= u;
+                } else {
+                    self.registers.a += u;
+                }
+                set_flags!(self.registers.a == 0, -1, 0, fc);
+            }
+            Instruction::STOP => {
+                unimplemented!("STOP")
             }
             /* Interrupt-related instructions */
             Instruction::EI => self.int_master_enabled = true,
             Instruction::DI => self.int_master_enabled = false,
+            Instruction::HALT => self.halted = true,
             /* Jumps and subroutine instructions */
             Instruction::JP(condition) => {
                 goto_addr!(
@@ -359,6 +396,9 @@ impl<'a> CpuContext<'a> {
                     self.fetch_data(&AddressingMode::D16).into(),
                     false
                 );
+            }
+            Instruction::JPHL => {
+                goto_addr!(&Condition::None, self.read_reg(&Register::HL).into(), false);
             }
             Instruction::JR(condition) => {
                 let rel: u8 = self.fetch_data(&AddressingMode::D8).into();
@@ -381,13 +421,15 @@ impl<'a> CpuContext<'a> {
                 DataKind::D8(_) => unreachable!(),
             },
             Instruction::POP(register) => {
-                if is_reg_16(*register) {
-                    let value = self.stack_pop_16();
-                    self.write_reg(register, value);
-                } else {
+                if !is_reg_16(*register) {
                     unreachable!()
                 }
-                // TODO set flags
+                let value = self.stack_pop_16();
+                self.write_reg(register, value);
+            }
+            Instruction::POPAF => {
+                let value = self.stack_pop_16();
+                self.write_reg(&Register::AF, value & 0xFFF0);
             }
             /* Load instructions */
             Instruction::LD(left_mode, right_mode) => {
@@ -420,6 +462,14 @@ impl<'a> CpuContext<'a> {
                 let hl = self.read_reg(&Register::HL).into();
                 self.registers.a = self.bus.read(hl);
                 self.write_reg(&Register::HL, hl - 1);
+            }
+            Instruction::LDHL => {
+                let rel: u8 = self.fetch_data(&AddressingMode::D8).into();
+                let hl: u16 = self.read_reg(&Register::HL).into();
+                self.write_reg(&Register::HL, hl.wrapping_add_signed(rel as i8 as i16));
+                let h = ((hl & 0xF) + (rel as u16 & 0xF)) >= 0x10;
+                let c = ((hl & 0xFF) + (rel as u16 & 0xFF)) >= 0x100;
+                set_flags!(0, 0, h, c);
             }
             /* Arithmetic instructions */
             Instruction::INC(register) => match self.read_reg(register) {
@@ -502,6 +552,20 @@ impl<'a> CpuContext<'a> {
                 self.registers.sp = new_data;
                 set_flags!(0, 0, h, c);
             }
+            Instruction::ADC(mode) => {
+                let data: u8 = self.fetch_data(mode).into();
+                let a = self.registers.a;
+                let old_c: u8 = if get_flag!(c) { 1 } else { 0 };
+
+                let (mut new_data, mut c) = a.overflowing_add(data);
+                if get_flag!(c) {
+                    let (new_new_data, new_c) = new_data.overflowing_add(1);
+                    new_data = new_new_data;
+                    c |= new_c;
+                }
+                self.registers.a = new_data;
+                set_flags!(new_data == 0, 0, (a & 0xF) + (data & 0xF) + old_c > 0xF, c);
+            }
             /* Bitwise logic instructions */
             Instruction::AND(mode) => {
                 let data: u8 = self.fetch_data(mode).into();
@@ -523,6 +587,46 @@ impl<'a> CpuContext<'a> {
                 self.registers.a ^= data;
                 set_flags!(self.registers.a == 0, 0, 0, 0);
             }
+            Instruction::CPL => {
+                self.registers.a = !self.registers.a;
+                set_flags!(-1, 1, 1, -1);
+            }
+            /* Bit shift instructions */
+            Instruction::RLA => {
+                let data: u8 = self.registers.a;
+                let c = (data & 0x80) != 0;
+                let new_data = (data << 1) | if get_flag!(c) { 1 } else { 0 };
+                self.registers.a = new_data;
+                set_flags!(0, 0, 0, c);
+            }
+            Instruction::RLCA => {
+                let data: u8 = self.registers.a;
+                let c = (data & 0x80) != 0;
+                let new_data = data.rotate_left(1);
+                self.registers.a = new_data;
+                set_flags!(0, 0, 0, c);
+            }
+            Instruction::RRA => {
+                let data: u8 = self.registers.a;
+                let c = (data & 0x01) != 0;
+                let new_data = (data >> 1) | if get_flag!(c) { 0x80 } else { 0 };
+                self.registers.a = new_data;
+                set_flags!(0, 0, 0, c);
+            }
+            Instruction::RRCA => {
+                let data: u8 = self.registers.a;
+                let c = (data & 0x01) != 0;
+                let new_data = data.rotate_right(1);
+                self.registers.a = new_data;
+                set_flags!(0, 0, 0, c);
+            }
+            /* Carry flag instructions */
+            Instruction::CCF => {
+                set_flags!(-1, 0, 0, !get_flag!(c));
+            }
+            Instruction::SCF => {
+                set_flags!(-1, 0, 0, 1);
+            }
             /* Prefix CB */
             Instruction::PREFIX => {
                 macro_rules! read_reg {
@@ -539,7 +643,9 @@ impl<'a> CpuContext<'a> {
                     ($r:expr, $v:expr) => {{
                         let val = $v;
                         match $r {
-                            Register::HL => self.write_bus(self.read_reg(&Register::HL).into(), val),
+                            Register::HL => {
+                                self.write_bus(self.read_reg(&Register::HL).into(), val)
+                            }
                             reg => self.write_reg(reg, val as u16),
                         };
                     }};
@@ -565,18 +671,60 @@ impl<'a> CpuContext<'a> {
                         let data: u8 = read_reg!(reg);
                         let new_data = data.rotate_left(1);
                         write_reg!(reg, new_data);
-                        set_flags!(new_data == 0, 0, 0, new_data & 0x01 != 0)
+                        set_flags!(new_data == 0, 0, 0, new_data & 0x01 != 0);
                     }
                     CBInstruction::RRC(reg) => {
                         let data: u8 = read_reg!(reg);
                         let new_data = data.rotate_right(1);
                         write_reg!(reg, new_data);
-                        set_flags!(new_data == 0, 0, 0, data & 0x01 != 0)
+                        set_flags!(new_data == 0, 0, 0, data & 0x01 != 0);
+                    }
+                    CBInstruction::RL(reg) => {
+                        let data: u8 = read_reg!(reg);
+                        let c = data & (1 << 7) != 0;
+                        let new_data = (data << 1) | if get_flag!(c) { 1 } else { 0 };
+                        write_reg!(reg, new_data);
+                        set_flags!(new_data == 0, 0, 0, c);
+                    }
+                    CBInstruction::RR(reg) => {
+                        let data: u8 = read_reg!(reg);
+                        let c = data & 1 != 0;
+                        let new_data = (data >> 1) | if get_flag!(c) { 1 << 7 } else { 0 };
+                        write_reg!(reg, new_data);
+                        set_flags!(new_data == 0, 0, 0, c);
+                    }
+                    CBInstruction::SLA(reg) => {
+                        let data: u8 = read_reg!(reg);
+                        let c = data & (1 << 7) != 0;
+                        let new_data = data << 1;
+                        write_reg!(reg, new_data);
+                        set_flags!(new_data == 0, 0, 0, c);
+                    }
+                    CBInstruction::SRA(reg) => {
+                        let data: u8 = read_reg!(reg);
+                        let c = data & 1 != 0;
+                        let new_data = (data >> 1) | (data & (1 << 7));
+                        write_reg!(reg, new_data);
+                        set_flags!(new_data == 0, 0, 0, c);
+                    }
+                    CBInstruction::SWAP(reg) => {
+                        let data: u8 = read_reg!(reg);
+                        let new_data = ((data & 0xF0) >> 4) | ((data & 0x0F) << 4);
+                        write_reg!(reg, new_data);
+                        set_flags!(new_data == 0, 0, 0, 0);
+                    }
+                    CBInstruction::SRL(reg) => {
+                        let data: u8 = read_reg!(reg);
+                        let c = data & 1 != 0;
+                        let new_data = data >> 1;
+                        write_reg!(reg, new_data);
+                        set_flags!(new_data == 0, 0, 0, c);
                     }
 
                     inst => unimplemented!("cb instruction kind {:?}", inst),
                 }
             }
+
             _ => unimplemented!("instruction kind {:?}", instruction),
         };
         println!(

@@ -29,7 +29,7 @@ pub enum Register {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Instruction {
     None,
-    ADC(Register, AddressingMode),
+    ADC(AddressingMode),
     ADD(AddressingMode),
     ADDHL(Register),
     ADDSP,
@@ -58,6 +58,7 @@ pub enum Instruction {
     NOP,
     OR(AddressingMode),
     POP(Register),
+    POPAF,
     PREFIX,
     PUSH(Register),
     RET(Condition),
@@ -67,7 +68,7 @@ pub enum Instruction {
     RRA,
     RRCA,
     RST(u8),
-    SBC(Register, AddressingMode),
+    SBC(AddressingMode),
     SCF,
     STOP,
     SUB(AddressingMode),
@@ -135,8 +136,8 @@ macro_rules! INST {
     ([DEC $l:tt]) => {
         Instruction::DEC(R!($l))
     };
-    ([ADC $l:tt,$r:tt]) => {
-        Instruction::ADC(R!($l), AM!($r))
+    ([ADC $l:tt]) => {
+        Instruction::ADC(AM!($l))
     };
     ([ADD $l:tt]) => {
         Instruction::ADD(AM!($l))
@@ -147,8 +148,8 @@ macro_rules! INST {
     ([JR $c:tt]) => {
         Instruction::JR(C!($c))
     };
-    ([SBC $l:tt,$r:tt]) => {
-        Instruction::SBC(R!($l), AM!($r))
+    ([SBC $l:tt]) => {
+        Instruction::SBC(AM!($l))
     };
     ([SUB $l:tt]) => {
         Instruction::SUB(AM!($l))
@@ -210,14 +211,14 @@ static INSTRUCTIONS: [Instruction; 0x100] = INST_MAP![
 /* 5x */    [LD D, B];      [LD D, C];      [LD D, D];      [LD D, E];      [LD D, H];      [LD D, L];      [LD D, (HL)];   [LD D, A];      [LD E, B];      [LD E, C];      [LD E, D];      [LD E, E];      [LD E, H];      [LD E, L];      [LD E, (HL)];   [LD E, A];
 /* 6x */    [LD H, B];      [LD H, C];      [LD H, D];      [LD H, E];      [LD H, H];      [LD H, L];      [LD H, (HL)];   [LD H, A];      [LD L, B];      [LD L, C];      [LD L, D];      [LD L, E];      [LD L, H];      [LD L, L];      [LD L, (HL)];   [LD L, A];
 /* 7x */    [LD (HL), B];   [LD (HL), C];   [LD (HL), D];   [LD (HL), E];   [LD (HL), H];   [LD (HL), L];   HALT;           [LD (HL), A];   [LD A, B];      [LD A, C];      [LD A, D];      [LD A, E];      [LD A, H];      [LD A, L];      [LD A, (HL)];   [LD A, A];
-/* 8x */    [ADD B];        [ADD C];        [ADD D];        [ADD E];        [ADD H];        [ADD L];        [ADD (HL)];     [ADD A];        [ADC A, B];     [ADC A, C];     [ADC A, D];     [ADC A, E];     [ADC A, H];     [ADC A, L];     [ADC A, (HL)];  [ADC A, A];
-/* 9x */    [SUB B];        [SUB C];        [SUB D];        [SUB E];        [SUB H];        [SUB L];        [SUB (HL)];     [SUB A];        [SBC A, B];     [SBC A, C];     [SBC A, D];     [SBC A, E];     [SBC A, H];     [SBC A, L];     [SBC A, (HL)];  [SBC A, A];
+/* 8x */    [ADD B];        [ADD C];        [ADD D];        [ADD E];        [ADD H];        [ADD L];        [ADD (HL)];     [ADD A];        [ADC B];        [ADC C];        [ADC D];        [ADC E];        [ADC H];        [ADC L];        [ADC (HL)];     [ADC A];
+/* 9x */    [SUB B];        [SUB C];        [SUB D];        [SUB E];        [SUB H];        [SUB L];        [SUB (HL)];     [SUB A];        [SBC B];        [SBC C];        [SBC D];        [SBC E];        [SBC H];        [SBC L];        [SBC (HL)];     [SBC A];
 /* Ax */    [AND B];        [AND C];        [AND D];        [AND E];        [AND H];        [AND L];        [AND (HL)];     [AND A];        [XOR B];        [XOR C];        [XOR D];        [XOR E];        [XOR H];        [XOR L];        [XOR (HL)];     [XOR A];
 /* Bx */    [OR B];         [OR C];         [OR D];         [OR E];         [OR H];         [OR L];         [OR (HL)];      [OR A];         [CP B];         [CP C];         [CP D];         [CP E];         [CP H];         [CP L];         [CP (HL)];      [CP A];
-/* Cx */    [RET NZ];       [POP BC];       [JP NZ];        [JP None];      [CALL NZ];      [PUSH BC];      [ADD d8];       [RST 0x00];     [RET Z];        [RET None];     [JP Z];         PREFIX;         [CALL Z];       [CALL None];    [ADC A, d8];    [RST 0x08];
-/* Dx */    [RET NC];       [POP DE];       [JP NC];        None;           [CALL NC];      [PUSH DE];      [SUB d8];       [RST 0x10];     [RET C];        RETI;           [JP C];         None;           [CALL C];       None;           [SBC A, d8];    [RST 0x18];
+/* Cx */    [RET NZ];       [POP BC];       [JP NZ];        [JP None];      [CALL NZ];      [PUSH BC];      [ADD d8];       [RST 0x00];     [RET Z];        [RET None];     [JP Z];         PREFIX;         [CALL Z];       [CALL None];    [ADC d8];       [RST 0x08];
+/* Dx */    [RET NC];       [POP DE];       [JP NC];        None;           [CALL NC];      [PUSH DE];      [SUB d8];       [RST 0x10];     [RET C];        RETI;           [JP C];         None;           [CALL C];       None;           [SBC d8];       [RST 0x18];
 /* Ex */    [LD a8, A];     [POP HL];       [LD (C), A];    None;           None;           [PUSH HL];      [AND d8];       [RST 0x20];     ADDSP;          JPHL;           [LD a16, A];    None;           None;           None;           [XOR d8];       [RST 0x28];
-/* Fx */    [LD A, a8];     [POP AF];       [LD A, (C)];    DI;             None;           [PUSH AF];      [OR d8];        [RST 0x30];     LDHL;           [LD SP, HL];    [LD A, a16];    EI;             None;           None;           [CP d8];        [RST 0x38];
+/* Fx */    [LD A, a8];     POPAF;          [LD A, (C)];    DI;             None;           [PUSH AF];      [OR d8];        [RST 0x30];     LDHL;           [LD SP, HL];    [LD A, a16];    EI;             None;           None;           [CP d8];        [RST 0x38];
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq)]
