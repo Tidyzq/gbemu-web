@@ -1,7 +1,5 @@
 use crate::bus::Bus;
-use crate::instruction::{
-    self, get_instruction_by_opcode, AddressingMode, Condition, Instruction, Register,
-};
+use crate::instruction::{AddressingMode, CBInstruction, Condition, Instruction, Register};
 
 #[derive(Debug, Default)]
 struct Registers {
@@ -112,6 +110,14 @@ impl<'a> CpuContext<'a> {
         self.halted = false;
     }
 
+    fn read_bus(&self, address: u16) -> u8 {
+        self.bus.read(address)
+    }
+
+    fn write_bus(&mut self, address: u16, value: u8) {
+        self.bus.write(address, value);
+    }
+
     fn read_bus_16(&self, address: u16) -> u16 {
         let lo = self.bus.read(address) as u16;
         let hi = self.bus.read(address + 1) as u16;
@@ -174,22 +180,6 @@ impl<'a> CpuContext<'a> {
         }
     }
 
-    fn set_flags(&mut self, z: i8, n: i8, h: i8, c: i8) {
-        macro_rules! set_flag_bit {
-            ($i:expr, $v:expr) => {
-                if $v == 1 {
-                    self.registers.f |= (1 << $i);
-                } else if $v == 0 {
-                    self.registers.f &= !(1 << $i);
-                }
-            };
-        }
-        set_flag_bit!(7, z);
-        set_flag_bit!(6, n);
-        set_flag_bit!(5, h);
-        set_flag_bit!(4, c);
-    }
-
     fn check_condition(&self, cond: &Condition) -> bool {
         macro_rules! flag_bit {
             ($i:expr) => {
@@ -239,11 +229,7 @@ impl<'a> CpuContext<'a> {
             self.bus.read(self.registers.pc + 2)
         );
         self.registers.pc += 1;
-        let instruction = get_instruction_by_opcode(current_opcode);
-        match instruction {
-            Instruction::None => unimplemented!(),
-            _ => instruction,
-        }
+        Instruction::from(current_opcode)
     }
 
     fn fetch_data(&mut self, addressing_mode: &AddressingMode) -> DataKind {
@@ -333,12 +319,40 @@ impl<'a> CpuContext<'a> {
             }};
         }
 
+        macro_rules! set_flag_bit {
+            ($i:expr, $v:literal) => {{
+                if $v == 1 {
+                    self.registers.f |= (1 << $i);
+                } else if $v == 0 {
+                    self.registers.f &= !(1 << $i);
+                }
+            }};
+            ($i:expr, $v:expr) => {{
+                if $v {
+                    self.registers.f |= (1 << $i);
+                } else {
+                    self.registers.f &= !(1 << $i);
+                }
+            }};
+        }
+
+        macro_rules! set_flags {
+            ($z:expr, $n:expr, $h:expr, $c:expr) => {{
+                set_flag_bit!(7, $z);
+                set_flag_bit!(6, $n);
+                set_flag_bit!(5, $h);
+                set_flag_bit!(4, $c);
+            }};
+        }
+
         match instruction {
             Instruction::NOP => {
                 // do nothing
             }
+            /* Interrupt-related instructions */
             Instruction::EI => self.int_master_enabled = true,
             Instruction::DI => self.int_master_enabled = false,
+            /* Jumps and subroutine instructions */
             Instruction::JP(condition) => {
                 goto_addr!(
                     condition,
@@ -348,12 +362,20 @@ impl<'a> CpuContext<'a> {
             }
             Instruction::JR(condition) => {
                 let rel: u8 = self.fetch_data(&AddressingMode::D8).into();
+                let (addr, _) = self.registers.pc.overflowing_add_signed(rel as i8 as i16);
+                goto_addr!(condition, addr, false);
+            }
+            Instruction::CALL(condition) => {
                 goto_addr!(
                     condition,
-                    (self.registers.pc as i16 + rel as i16) as u16,
-                    false
+                    self.fetch_data(&AddressingMode::D16).into(),
+                    true
                 );
             }
+            Instruction::RET(condition) => {
+                goto_addr!(condition, self.stack_pop_16(), false);
+            }
+            /* Stack manipulation instructions */
             Instruction::PUSH(register) => match self.read_reg(register) {
                 DataKind::D16(data) => self.stack_push_16(data),
                 DataKind::D8(_) => unreachable!(),
@@ -367,20 +389,24 @@ impl<'a> CpuContext<'a> {
                 }
                 // TODO set flags
             }
-            Instruction::CALL(condition) => {
-                goto_addr!(
-                    condition,
-                    self.fetch_data(&AddressingMode::D16).into(),
-                    true
-                );
-            }
-            Instruction::RET(condition) => {
-                goto_addr!(condition, self.stack_pop_16(), false);
-            }
+            /* Load instructions */
             Instruction::LD(left_mode, right_mode) => {
                 let left = self.fetch_left_data(left_mode);
                 let right = self.fetch_data(right_mode);
                 self.write_data(&left, &right);
+            }
+            Instruction::LDI1 => {
+                // LD (HL+),A
+                let hl = self.read_reg(&Register::HL).into();
+                let a = self.registers.a;
+                self.bus.write(hl, a);
+                self.write_reg(&Register::HL, hl + 1);
+            }
+            Instruction::LDI2 => {
+                // LD A,(HL+)
+                let hl = self.read_reg(&Register::HL).into();
+                self.registers.a = self.bus.read(hl);
+                self.write_reg(&Register::HL, hl + 1);
             }
             Instruction::LDD1 => {
                 // LD (HL-),A
@@ -395,15 +421,161 @@ impl<'a> CpuContext<'a> {
                 self.registers.a = self.bus.read(hl);
                 self.write_reg(&Register::HL, hl - 1);
             }
-            // Instruction::DEC(register) => {}
-            Instruction::XOR(mode) => {
-                let data = match self.fetch_data(mode) {
-                    DataKind::D8(data) => data,
-                    DataKind::D16(data) => data as u8,
-                    _ => unreachable!(),
+            /* Arithmetic instructions */
+            Instruction::INC(register) => match self.read_reg(register) {
+                DataKind::D8(data) => {
+                    let (new_data, _) = data.overflowing_add(1);
+                    self.write_reg(register, new_data as u16);
+                    set_flags!(data == 0, 0, (data & 0x0F) == 0, -1);
+                }
+                DataKind::D16(data) => {
+                    let (new_data, _) = data.overflowing_add(1);
+                    self.emu_cycles(1);
+                    self.write_reg(register, new_data);
+                }
+            },
+            Instruction::DEC(register) => match self.read_reg(register) {
+                DataKind::D8(data) => {
+                    let (new_data, _) = data.overflowing_sub(1);
+                    self.write_reg(register, new_data as u16);
+                    set_flags!(data == 0, 1, (data & 0x0F) == 0x0F, -1);
+                }
+                DataKind::D16(data) => {
+                    let (new_data, _) = data.overflowing_sub(1);
+                    self.emu_cycles(1);
+                    self.write_reg(register, new_data);
+                }
+            },
+            Instruction::INCHL => {
+                let register = &Register::HL;
+                let addr: u16 = self.read_reg(register).into();
+                let (data, _) = self.read_bus(addr).overflowing_add(1);
+                self.emu_cycles(1);
+
+                self.write_bus(addr, data);
+
+                set_flags!(data == 0, 0, (data & 0x0F) == 0, -1);
+            }
+            Instruction::DECHL => {
+                let addr: u16 = self.read_reg(&Register::HL).into();
+                let (data, _) = self.read_bus(addr).overflowing_sub(1);
+                self.emu_cycles(1);
+
+                self.write_bus(addr, data);
+
+                set_flags!(data == 0, 1, (data & 0x0F) == 0x0F, -1);
+            }
+            Instruction::ADD(mode) => {
+                let data: u8 = self.fetch_data(mode).into();
+                let (new_data, c) = self.registers.a.overflowing_add(data);
+                let z = data == 0;
+                let h = (self.registers.a & 0x0F) + (data & 0x0F) >= 0x10;
+                self.registers.a = new_data;
+                set_flags!(z, 0, h, c);
+            }
+            Instruction::SUB(mode) => {
+                let data: u8 = self.fetch_data(mode).into();
+                let (new_data, c) = self.registers.a.overflowing_sub(data);
+                let z = data == 0;
+                let h = (self.registers.a & 0x0F) < (data & 0x0F);
+                self.registers.a = new_data;
+                set_flags!(z, 1, h, c);
+            }
+            Instruction::ADDHL(register) => {
+                let data = match self.read_reg(register) {
+                    DataKind::D8(_) => unreachable!(),
+                    DataKind::D16(data) => data,
                 };
-                self.registers.a = self.registers.a ^ data;
-                self.set_flags((self.registers.a == 0) as i8, 0, 0, 0)
+                let hl: u16 = self.read_reg(&Register::HL).into();
+                self.emu_cycles(1);
+                let (new_data, c) = hl.overflowing_add(data);
+                let h = (hl & 0x0FFF) + (data & 0x0FFF) >= 0x1000;
+                self.write_reg(&Register::HL, new_data);
+                set_flags!(-1, 0, h, c);
+            }
+            Instruction::ADDSP => {
+                let data: u8 = self.fetch_data(&AddressingMode::D8).into();
+                let sp = self.registers.sp;
+                self.emu_cycles(1);
+                let (new_data, c) = sp.overflowing_add_signed(data as i8 as i16);
+                let h = (sp & 0x0F) + (data as u16 & 0x0F) >= 0x10;
+                self.registers.sp = new_data;
+                set_flags!(0, 0, h, c);
+            }
+            /* Bitwise logic instructions */
+            Instruction::AND(mode) => {
+                let data: u8 = self.fetch_data(mode).into();
+                self.registers.a &= data;
+                set_flags!(self.registers.a == 0, 0, 0, 0);
+            }
+            Instruction::CP(mode) => {
+                let data: u8 = self.fetch_data(mode).into();
+                let a = self.registers.a;
+                set_flags!(a == data, 1, a & 0x0F < data & 0x0F, a < data);
+            }
+            Instruction::OR(mode) => {
+                let data: u8 = self.fetch_data(mode).into();
+                self.registers.a |= data;
+                set_flags!(self.registers.a == 0, 0, 0, 0);
+            }
+            Instruction::XOR(mode) => {
+                let data: u8 = self.fetch_data(mode).into();
+                self.registers.a ^= data;
+                set_flags!(self.registers.a == 0, 0, 0, 0);
+            }
+            /* Prefix CB */
+            Instruction::PREFIX => {
+                macro_rules! read_reg {
+                    ($r:expr) => {{
+                        let d: u8 = match $r {
+                            Register::HL => self.read_bus(self.read_reg(&Register::HL).into()),
+                            reg => self.read_reg(reg).into(),
+                        };
+                        d
+                    }};
+                }
+
+                macro_rules! write_reg {
+                    ($r:expr, $v:expr) => {{
+                        let val = $v;
+                        match $r {
+                            Register::HL => self.write_bus(self.read_reg(&Register::HL).into(), val),
+                            reg => self.write_reg(reg, val as u16),
+                        };
+                    }};
+                }
+
+                let opcode: u8 = self.fetch_data(&AddressingMode::D8).into();
+                match CBInstruction::from(opcode) {
+                    CBInstruction::BIT(bit, reg) => {
+                        let data: u8 = read_reg!(reg);
+                        set_flags!((data & (1 << bit)) == 0, 0, 1, -1);
+                    }
+                    CBInstruction::RES(bit, reg) => {
+                        let data: u8 = read_reg!(reg);
+                        let new_data = data & !(1 << bit);
+                        write_reg!(reg, new_data);
+                    }
+                    CBInstruction::SET(bit, reg) => {
+                        let data: u8 = read_reg!(reg);
+                        let new_data = data | (1 << bit);
+                        write_reg!(reg, new_data);
+                    }
+                    CBInstruction::RLC(reg) => {
+                        let data: u8 = read_reg!(reg);
+                        let new_data = data.rotate_left(1);
+                        write_reg!(reg, new_data);
+                        set_flags!(new_data == 0, 0, 0, new_data & 0x01 != 0)
+                    }
+                    CBInstruction::RRC(reg) => {
+                        let data: u8 = read_reg!(reg);
+                        let new_data = data.rotate_right(1);
+                        write_reg!(reg, new_data);
+                        set_flags!(new_data == 0, 0, 0, data & 0x01 != 0)
+                    }
+
+                    inst => unimplemented!("cb instruction kind {:?}", inst),
+                }
             }
             _ => unimplemented!("instruction kind {:?}", instruction),
         };
