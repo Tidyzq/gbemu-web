@@ -1,5 +1,5 @@
+use crate::{bus::BusModule, utils::array};
 use std::io::Read;
-use crate::utils::array;
 
 static CARTRIDGE_TYPE: [&'static str; 256] = array!["Unknown"; 256;
   [0x00] = "ROM ONLY",
@@ -197,14 +197,16 @@ impl Cartridge {
         }
         ((x & 0xFF) as u8) == self.as_header().checksum
     }
+}
 
-    pub fn read(&self, address: u16) -> u8 {
+impl BusModule for Cartridge {
+    fn read(&self, address: u16) -> u8 {
         // for now just ROM ONLY
 
         self.data[address as usize]
     }
 
-    pub fn write(&mut self, address: u16, value: u8) {
+    fn write(&mut self, address: u16, value: u8) {
         // for now ROM ONLY
 
         unimplemented!();

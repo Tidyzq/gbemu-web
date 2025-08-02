@@ -1,5 +1,5 @@
 use crate::bus::Bus;
-use crate::instruction::{AddressingMode, CBInstruction, Condition, Instruction, Register};
+use crate::instruction::{self, AddressingMode, CBInstruction, Condition, Instruction, Register};
 
 #[derive(Debug, Default)]
 struct Registers {
@@ -24,16 +24,17 @@ fn is_reg_16(reg: Register) -> bool {
     }
 }
 
-#[derive(Debug)]
 pub struct CpuContext<'a> {
     registers: Registers,
 
     pub halted: bool,
     pub stepping: bool,
 
-    int_master_enabled: bool,
+    interrupt_master_enabled: bool,
+    interrupt_enable: u8,
+    interrupt_flag: u8,
 
-    bus: &'a mut Bus<'a>,
+    bus: Bus<'a>,
 }
 
 #[derive(Debug)]
@@ -92,35 +93,54 @@ macro_rules! concat_u16 {
 }
 
 impl<'a> CpuContext<'a> {
-    pub fn create(bus: &'a mut Bus<'a>) -> Self {
+    pub fn create(bus: Bus<'a>) -> Self {
         CpuContext {
             registers: Registers::default(),
 
             halted: true,
             stepping: false,
 
-            int_master_enabled: false,
+            interrupt_master_enabled: false,
+            interrupt_enable: 0,
+            interrupt_flag: 0,
 
             bus,
         }
     }
 
     pub fn init(&mut self) {
-        self.registers.pc = 0x100;
+        self.registers.a = 0x01;
+        self.registers.f = 0b1011 << 4;
+        self.registers.b = 0x00;
+        self.registers.c = 0x13;
+        self.registers.d = 0x00;
+        self.registers.e = 0xD8;
+        self.registers.h = 0x01;
+        self.registers.l = 0x4D;
+        self.registers.pc = 0x0100;
+        self.registers.sp = 0xFFFE;
         self.halted = false;
     }
 
     fn read_bus(&self, address: u16) -> u8 {
-        self.bus.read(address)
+        match address {
+            0xFFFF => self.interrupt_enable,
+            0xFF0F => self.interrupt_flag,
+            _ => self.bus.read(address),
+        }
     }
 
     fn write_bus(&mut self, address: u16, value: u8) {
-        self.bus.write(address, value);
+        match address {
+            0xFFFF => self.interrupt_enable = value,
+            0xFF0F => self.interrupt_flag = value,
+            _ => self.bus.write(address, value),
+        }
     }
 
     fn read_bus_16(&self, address: u16) -> u16 {
-        let lo = self.bus.read(address) as u16;
-        let hi = self.bus.read(address + 1) as u16;
+        let lo = self.read_bus(address) as u16;
+        let hi = self.read_bus(address + 1) as u16;
 
         lo | (hi << 8)
     }
@@ -128,8 +148,8 @@ impl<'a> CpuContext<'a> {
     fn write_bus_16(&mut self, address: u16, value: u16) {
         let lo = (value & 0x00FF) as u8;
         let hi = ((value & 0xFF00) >> 8) as u8;
-        self.bus.write(address, lo);
-        self.bus.write(address, hi);
+        self.write_bus(address, lo);
+        self.write_bus(address, hi);
     }
 
     fn read_reg(&self, register: &Register) -> DataKind {
@@ -200,14 +220,14 @@ impl<'a> CpuContext<'a> {
 
     pub fn stack_push(&mut self, data: u8) {
         self.registers.sp -= 1;
-        self.bus.write(self.registers.sp, data);
+        self.write_bus(self.registers.sp, data);
     }
     pub fn stack_push_16(&mut self, data: u16) {
         self.stack_push(((data >> 8) & 0xFF) as u8);
         self.stack_push((data & 0xFF) as u8);
     }
     pub fn stack_pop(&mut self) -> u8 {
-        let data = self.bus.read(self.registers.sp);
+        let data = self.read_bus(self.registers.sp);
         self.registers.sp += 1;
         data
     }
@@ -220,46 +240,69 @@ impl<'a> CpuContext<'a> {
     fn emu_cycles(&self, cycles: u8) {}
 
     fn fetch_instruction(&mut self) -> &'static Instruction {
-        let current_opcode = self.bus.read(self.registers.pc);
-        print!(
-            "{:04x?}: ({:02x} {:02x} {:02x}) ",
+        let current_opcode = self.read_bus(self.registers.pc);
+        macro_rules! print_flag {
+            ($c:literal, $i:literal) => {
+                if self.registers.f & (1 << $i) != 0 {
+                    $c
+                } else {
+                    '-'
+                }
+            };
+        }
+
+        let instruction = Instruction::from(current_opcode);
+        println!(
+            "{:04X?}: {:<15} ({:02X} {:02X} {:02X}) A: {:02X?} F: {} BC: {:04X?} DE: {:04X?} HL: {:04X?}",
             self.registers.pc,
+            format!("{:?}", instruction),
             current_opcode,
-            self.bus.read(self.registers.pc + 1),
-            self.bus.read(self.registers.pc + 2)
+            self.read_bus(self.registers.pc + 1),
+            self.read_bus(self.registers.pc + 2),
+            self.registers.a,
+            format!(
+                "{}{}{}{}",
+                print_flag!('Z', 7),
+                print_flag!('N', 6),
+                print_flag!('H', 5),
+                print_flag!('C', 4),
+            ),
+            concat_u16!(self.registers.b, self.registers.c),
+            concat_u16!(self.registers.d, self.registers.e),
+            concat_u16!(self.registers.h, self.registers.l),
         );
         self.registers.pc += 1;
-        Instruction::from(current_opcode)
+        instruction
     }
 
     fn fetch_data(&mut self, addressing_mode: &AddressingMode) -> DataKind {
         match addressing_mode {
             AddressingMode::R(register) => self.read_reg(register),
             AddressingMode::MR(register) => {
-                DataKind::D8(self.bus.read(self.read_reg(register).into()))
+                DataKind::D8(self.read_bus(self.read_reg(register).into()))
             }
             AddressingMode::A8 | AddressingMode::D8 => {
-                let data = self.bus.read(self.registers.pc);
+                let data = self.read_bus(self.registers.pc);
                 self.registers.pc += 1;
                 self.emu_cycles(1);
                 match addressing_mode {
-                    AddressingMode::A8 => DataKind::D8(self.bus.read(0xFF00 | data as u16)),
+                    AddressingMode::A8 => DataKind::D8(self.read_bus(0xFF00 | data as u16)),
                     AddressingMode::D8 => DataKind::D8(data),
                     _ => unreachable!(),
                 }
             }
             AddressingMode::A16 | AddressingMode::D16 => {
-                let lo = self.bus.read(self.registers.pc) as u16;
+                let lo = self.read_bus(self.registers.pc) as u16;
                 self.registers.pc += 1;
                 self.emu_cycles(1);
 
-                let hi = self.bus.read(self.registers.pc) as u16;
+                let hi = self.read_bus(self.registers.pc) as u16;
                 self.registers.pc += 1;
                 self.emu_cycles(1);
 
                 let data = lo | (hi << 8);
                 match addressing_mode {
-                    AddressingMode::A16 => DataKind::D8(self.bus.read(data)),
+                    AddressingMode::A16 => DataKind::D8(self.read_bus(data)),
                     AddressingMode::D16 => DataKind::D16(data),
                     _ => unreachable!(),
                 }
@@ -272,7 +315,7 @@ impl<'a> CpuContext<'a> {
             AddressingMode::R(register) => LeftDataKind::R(*register),
             AddressingMode::MR(register) => LeftDataKind::MR(*register),
             AddressingMode::A8 => {
-                let data = self.bus.read(self.registers.pc);
+                let data = self.read_bus(self.registers.pc);
                 self.registers.pc += 1;
                 self.emu_cycles(1);
                 LeftDataKind::A16(0xFF00 | data as u16)
@@ -293,27 +336,26 @@ impl<'a> CpuContext<'a> {
             LeftDataKind::MR(register) => {
                 let address = self.read_reg(register);
                 match data {
-                    DataKind::D8(data) => self.bus.write(address.into(), *data),
+                    DataKind::D8(data) => self.write_bus(address.into(), *data),
                     DataKind::D16(data) => self.write_bus_16(address.into(), *data),
                     _ => unreachable!(),
                 }
             }
-            LeftDataKind::A16(address) => self.bus.write(*address, data.into()),
+            LeftDataKind::A16(address) => self.write_bus(*address, data.into()),
         }
     }
 
     fn execute(&mut self, instruction: &Instruction) {
-        print!("{:<16} ", format!("{:?}", instruction));
+        // print!("{:<16} ", format!("{:?}", instruction));
 
         macro_rules! goto_addr {
             ($cond:expr, $addr:expr, $push:expr) => {{
-                let address = $addr;
                 if self.check_condition($cond) {
                     if $push {
                         self.emu_cycles(2);
                         self.stack_push_16(self.registers.pc);
                     }
-                    self.registers.pc = address;
+                    self.registers.pc = $addr;
                     self.emu_cycles(1);
                 }
             }};
@@ -364,53 +406,60 @@ impl<'a> CpuContext<'a> {
             /* Miscellaneous instructions */
             Instruction::NOP => {}
             Instruction::DAA => {
-                let mut u: u8 = 0;
-                let mut fc = false;
-
-                if get_flag!(h) || (!get_flag!(n) && (self.registers.a & 0xf) > 9) {
-                    u = 6;
-                }
-                if get_flag!(h) || (!get_flag!(n) && self.registers.a > 0x99) {
-                    u |= 0x60;
-                    fc = true;
-                }
-
+                let a = self.registers.a;
+                let h = get_flag!(h);
+                let mut c = get_flag!(c);
+                let mut adjust: u8 = 0;
                 if get_flag!(n) {
-                    self.registers.a -= u;
+                    if h {
+                        adjust = 0x6;
+                    }
+                    if c {
+                        adjust += 0x60;
+                    }
+                    self.registers.a = self.registers.a.overflowing_sub(adjust).0
                 } else {
-                    self.registers.a += u;
+                    if h || (a & 0xF) > 0x9 {
+                        adjust = 0x6;
+                    }
+                    if c || a > 0x99 {
+                        adjust += 0x60;
+                        c = true;
+                    }
+                    self.registers.a = self.registers.a.overflowing_add(adjust).0
                 }
-                set_flags!(self.registers.a == 0, -1, 0, fc);
+                set_flags!(self.registers.a == 0, -1, 0, c);
             }
             Instruction::STOP => {
                 unimplemented!("STOP")
             }
             /* Interrupt-related instructions */
-            Instruction::EI => self.int_master_enabled = true,
-            Instruction::DI => self.int_master_enabled = false,
+            Instruction::EI => self.interrupt_master_enabled = true,
+            Instruction::DI => self.interrupt_master_enabled = false,
             Instruction::HALT => self.halted = true,
             /* Jumps and subroutine instructions */
             Instruction::JP(condition) => {
-                goto_addr!(
-                    condition,
-                    self.fetch_data(&AddressingMode::D16).into(),
-                    false
-                );
+                let addr = self.fetch_data(&AddressingMode::D16).into();
+                goto_addr!(condition, addr, false);
             }
             Instruction::JPHL => {
-                goto_addr!(&Condition::None, self.read_reg(&Register::HL).into(), false);
+                let addr = self.read_reg(&Register::HL).into();
+                goto_addr!(&Condition::None, addr, false);
             }
             Instruction::JR(condition) => {
                 let rel: u8 = self.fetch_data(&AddressingMode::D8).into();
-                let (addr, _) = self.registers.pc.overflowing_add_signed(rel as i8 as i16);
-                goto_addr!(condition, addr, false);
-            }
-            Instruction::CALL(condition) => {
                 goto_addr!(
                     condition,
-                    self.fetch_data(&AddressingMode::D16).into(),
-                    true
+                    {
+                        let (addr, _) = self.registers.pc.overflowing_add_signed(rel as i8 as i16);
+                        addr
+                    },
+                    false
                 );
+            }
+            Instruction::CALL(condition) => {
+                let addr = self.fetch_data(&AddressingMode::D16).into();
+                goto_addr!(condition, addr, true);
             }
             Instruction::RET(condition) => {
                 goto_addr!(condition, self.stack_pop_16(), false);
@@ -441,26 +490,26 @@ impl<'a> CpuContext<'a> {
                 // LD (HL+),A
                 let hl = self.read_reg(&Register::HL).into();
                 let a = self.registers.a;
-                self.bus.write(hl, a);
+                self.write_bus(hl, a);
                 self.write_reg(&Register::HL, hl + 1);
             }
             Instruction::LDI2 => {
                 // LD A,(HL+)
                 let hl = self.read_reg(&Register::HL).into();
-                self.registers.a = self.bus.read(hl);
+                self.registers.a = self.read_bus(hl);
                 self.write_reg(&Register::HL, hl + 1);
             }
             Instruction::LDD1 => {
                 // LD (HL-),A
                 let hl = self.read_reg(&Register::HL).into();
                 let a = self.registers.a;
-                self.bus.write(hl, a);
+                self.write_bus(hl, a);
                 self.write_reg(&Register::HL, hl - 1);
             }
             Instruction::LDD2 => {
                 // LD A,(HL-)
                 let hl = self.read_reg(&Register::HL).into();
-                self.registers.a = self.bus.read(hl);
+                self.registers.a = self.read_bus(hl);
                 self.write_reg(&Register::HL, hl - 1);
             }
             Instruction::LDHL => {
@@ -476,7 +525,7 @@ impl<'a> CpuContext<'a> {
                 DataKind::D8(data) => {
                     let (new_data, _) = data.overflowing_add(1);
                     self.write_reg(register, new_data as u16);
-                    set_flags!(data == 0, 0, (data & 0x0F) == 0, -1);
+                    set_flags!(new_data == 0, 0, (new_data & 0x0F) == 0, -1);
                 }
                 DataKind::D16(data) => {
                     let (new_data, _) = data.overflowing_add(1);
@@ -488,7 +537,7 @@ impl<'a> CpuContext<'a> {
                 DataKind::D8(data) => {
                     let (new_data, _) = data.overflowing_sub(1);
                     self.write_reg(register, new_data as u16);
-                    set_flags!(data == 0, 1, (data & 0x0F) == 0x0F, -1);
+                    set_flags!(new_data == 0, 1, (new_data & 0x0F) == 0x0F, -1);
                 }
                 DataKind::D16(data) => {
                     let (new_data, _) = data.overflowing_sub(1);
@@ -518,18 +567,16 @@ impl<'a> CpuContext<'a> {
             Instruction::ADD(mode) => {
                 let data: u8 = self.fetch_data(mode).into();
                 let (new_data, c) = self.registers.a.overflowing_add(data);
-                let z = data == 0;
                 let h = (self.registers.a & 0x0F) + (data & 0x0F) >= 0x10;
                 self.registers.a = new_data;
-                set_flags!(z, 0, h, c);
+                set_flags!(new_data == 0, 0, h, c);
             }
             Instruction::SUB(mode) => {
                 let data: u8 = self.fetch_data(mode).into();
                 let (new_data, c) = self.registers.a.overflowing_sub(data);
-                let z = data == 0;
                 let h = (self.registers.a & 0x0F) < (data & 0x0F);
                 self.registers.a = new_data;
-                set_flags!(z, 1, h, c);
+                set_flags!(new_data == 0, 1, h, c);
             }
             Instruction::ADDHL(register) => {
                 let data = match self.read_reg(register) {
@@ -727,20 +774,14 @@ impl<'a> CpuContext<'a> {
 
             _ => unimplemented!("instruction kind {:?}", instruction),
         };
-        println!(
-            "AF: {:04X?} BC: {:04X?} DE: {:04X?} HL: {:04X?} SP: {:04X?}",
-            concat_u16!(self.registers.a, self.registers.f),
-            concat_u16!(self.registers.b, self.registers.c),
-            concat_u16!(self.registers.d, self.registers.e),
-            concat_u16!(self.registers.h, self.registers.l),
-            self.registers.sp,
-        );
     }
 
     pub fn step(&mut self) -> bool {
         if !self.halted {
             let instruction = self.fetch_instruction();
             self.execute(instruction);
+        } else {
+            self.emu_cycles(1);
         }
 
         return true;

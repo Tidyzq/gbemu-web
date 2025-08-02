@@ -12,17 +12,17 @@
 // 0xFF80 - 0xFFFE : High RAM (HRAM)
 // 0xFFFF - 0xFFFF : Interrupt Enable register (IE)
 
-use crate::{
-    cartridge::Cartridge,
-    ram::{HighRam, WorkingRam},
-};
-
 // 模拟总线
-#[derive(Debug)]
 pub struct Bus<'a> {
-    pub cartridge: &'a mut Cartridge,
-    pub wram: &'a mut WorkingRam,
-    pub hram: &'a mut HighRam,
+    pub cartridge: &'a mut dyn BusModule,
+    pub wram: &'a mut dyn BusModule,
+    pub hram: &'a mut dyn BusModule,
+    pub io: &'a mut dyn BusModule,
+}
+
+pub trait BusModule {
+    fn read(&self, address: u16) -> u8;
+    fn write(&mut self, address: u16, value: u8);
 }
 
 impl<'a> Bus<'a> {
@@ -30,9 +30,10 @@ impl<'a> Bus<'a> {
         match address {
             0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.read(address),
             0xC000..=0xDFFF => self.wram.read(address - 0xC000),
+            0xFF00..=0xFF7F => self.io.read(address - 0xFF00),
             0xFF80..=0xFFFE => self.hram.read(address - 0xFF80),
             _ => {
-                println!("Bus read at 0x{:X?}", address);
+                println!("Unsupported bus read at 0x{:X?}", address);
                 0
             }
         }
@@ -42,8 +43,9 @@ impl<'a> Bus<'a> {
         match address {
             0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.write(address, value),
             0xC000..=0xDFFF => self.wram.write(address - 0xC000, value),
+            0xFF00..=0xFF7F => self.io.write(address - 0xFF00, value),
             0xFF80..=0xFFFE => self.hram.write(address - 0xFF80, value),
-            _ => println!("Bus write at 0x{:X?}", address),
+            _ => println!("Unsupported bus write at 0x{:X?} = {:X?}", address, value),
         }
     }
 }
