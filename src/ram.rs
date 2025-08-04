@@ -1,4 +1,4 @@
-use crate::bus::BusModule;
+use crate::cpu::BusModule;
 
 #[derive(Debug)]
 pub struct Ram<const SIZE: usize> {

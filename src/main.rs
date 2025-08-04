@@ -1,10 +1,11 @@
-mod bus;
 mod cartridge;
 mod cpu;
 mod emu;
 mod instruction;
+mod interrupt;
 mod io;
 mod ram;
+mod timer;
 mod utils;
 
 use cartridge::Cartridge;

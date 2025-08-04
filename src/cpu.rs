@@ -1,5 +1,9 @@
-use crate::bus::Bus;
-use crate::instruction::{self, AddressingMode, CBInstruction, Condition, Instruction, Register};
+use crate::{
+    instruction::{AddressingMode, CBInstruction, Condition, Instruction, Register},
+    interrupt::Interrupt,
+    io::IO,
+    timer::Timer,
+};
 
 #[derive(Debug, Default)]
 struct Registers {
@@ -24,17 +28,26 @@ fn is_reg_16(reg: Register) -> bool {
     }
 }
 
+pub trait BusModule {
+    fn read(&self, address: u16) -> u8;
+    fn write(&mut self, address: u16, value: u8);
+}
+
 pub struct CpuContext<'a> {
-    registers: Registers,
+    pub registers: Registers,
 
     pub halted: bool,
     pub stepping: bool,
 
-    interrupt_master_enabled: bool,
-    interrupt_enable: u8,
-    interrupt_flag: u8,
+    pub enabling_ime: bool,
+    interrupt: Interrupt,
 
-    bus: Bus<'a>,
+    timer: Timer,
+
+    cartridge: &'a mut dyn BusModule,
+    wram: &'a mut dyn BusModule,
+    hram: &'a mut dyn BusModule,
+    io: &'a mut IO,
 }
 
 #[derive(Debug)]
@@ -93,18 +106,27 @@ macro_rules! concat_u16 {
 }
 
 impl<'a> CpuContext<'a> {
-    pub fn create(bus: Bus<'a>) -> Self {
+    pub fn create(
+        cartridge: &'a mut dyn BusModule,
+        wram: &'a mut dyn BusModule,
+        hram: &'a mut dyn BusModule,
+        io: &'a mut IO,
+    ) -> Self {
         CpuContext {
             registers: Registers::default(),
 
             halted: true,
             stepping: false,
 
-            interrupt_master_enabled: false,
-            interrupt_enable: 0,
-            interrupt_flag: 0,
+            enabling_ime: false,
+            interrupt: Interrupt::create(),
 
-            bus,
+            timer: Timer::create(),
+
+            cartridge,
+            wram,
+            hram,
+            io,
         }
     }
 
@@ -122,19 +144,36 @@ impl<'a> CpuContext<'a> {
         self.halted = false;
     }
 
-    fn read_bus(&self, address: u16) -> u8 {
+    pub fn read_bus(&self, address: u16) -> u8 {
         match address {
-            0xFFFF => self.interrupt_enable,
-            0xFF0F => self.interrupt_flag,
-            _ => self.bus.read(address),
+            0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.read(address),
+            0xC000..=0xDFFF => self.wram.read(address - 0xC000),
+            0xFF00..=0xFF7F => match address {
+                0xFF04..=0xFF07 => self.timer.read(address),
+                0xFF0F => self.interrupt.flag,
+                0xFFFF => self.interrupt.enable,
+                _ => self.io.read(address),
+            },
+            0xFF80..=0xFFFE => self.hram.read(address - 0xFF80),
+            _ => {
+                // println!("Unsupported bus read at 0x{:X?}", address);
+                0
+            }
         }
     }
 
-    fn write_bus(&mut self, address: u16, value: u8) {
+    pub fn write_bus(&mut self, address: u16, value: u8) {
         match address {
-            0xFFFF => self.interrupt_enable = value,
-            0xFF0F => self.interrupt_flag = value,
-            _ => self.bus.write(address, value),
+            0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.write(address, value),
+            0xC000..=0xDFFF => self.wram.write(address - 0xC000, value),
+            0xFF00..=0xFF7F => match address {
+                0xFF04..=0xFF07 => self.timer.write(address, value),
+                0xFF0F => self.interrupt.flag = value,
+                0xFFFF => self.interrupt.enable = value,
+                _ => self.io.write(address, value),
+            },
+            0xFF80..=0xFFFE => self.hram.write(address - 0xFF80, value),
+            _ => {} // _ => println!("Unsupported bus write at 0x{:X?} = {:X?}", address, value),
         }
     }
 
@@ -237,7 +276,15 @@ impl<'a> CpuContext<'a> {
         (lo as u16) | ((hi as u16) << 8)
     }
 
-    fn emu_cycles(&self, cycles: u8) {}
+    fn emu_cycles(&mut self, cycles: u8) {
+        let n = cycles as usize * 4;
+        for _ in 0..n {
+            if self.timer.tick() {
+                self.interrupt
+                    .request_interrupt(crate::interrupt::InterruptKind::Timer);
+            }
+        }
+    }
 
     fn fetch_instruction(&mut self) -> &'static Instruction {
         let current_opcode = self.read_bus(self.registers.pc);
@@ -253,7 +300,7 @@ impl<'a> CpuContext<'a> {
 
         let instruction = Instruction::from(current_opcode);
         println!(
-            "{:04X?}: {:<15} ({:02X} {:02X} {:02X}) A: {:02X?} F: {} BC: {:04X?} DE: {:04X?} HL: {:04X?}",
+            "{:04X?}: {:<15} ({:02X} {:02X} {:02X}) A: {:02X?} F: {} BC: {:04X?} DE: {:04X?} HL: {:04X?} SP: {:04X?}",
             self.registers.pc,
             format!("{:?}", instruction),
             current_opcode,
@@ -270,6 +317,7 @@ impl<'a> CpuContext<'a> {
             concat_u16!(self.registers.b, self.registers.c),
             concat_u16!(self.registers.d, self.registers.e),
             concat_u16!(self.registers.h, self.registers.l),
+            self.registers.sp,
         );
         self.registers.pc += 1;
         instruction
@@ -434,8 +482,11 @@ impl<'a> CpuContext<'a> {
                 unimplemented!("STOP")
             }
             /* Interrupt-related instructions */
-            Instruction::EI => self.interrupt_master_enabled = true,
-            Instruction::DI => self.interrupt_master_enabled = false,
+            Instruction::EI => {
+                /* 由于 EI 指令要求在下一个指令结束才设置 IME，先存到 enabling_ime */
+                self.enabling_ime = true;
+            }
+            Instruction::DI => self.interrupt.master_enabled = false,
             Instruction::HALT => self.halted = true,
             /* Jumps and subroutine instructions */
             Instruction::JP(condition) => {
@@ -463,6 +514,13 @@ impl<'a> CpuContext<'a> {
             }
             Instruction::RET(condition) => {
                 goto_addr!(condition, self.stack_pop_16(), false);
+            }
+            Instruction::RETI => {
+                self.interrupt.master_enabled = true;
+                goto_addr!(&Condition::None, self.stack_pop_16(), false);
+            }
+            Instruction::RST(vec) => {
+                goto_addr!(&Condition::None, *vec as u16, true);
             }
             /* Stack manipulation instructions */
             Instruction::PUSH(register) => match self.read_reg(register) {
@@ -514,10 +572,10 @@ impl<'a> CpuContext<'a> {
             }
             Instruction::LDHL => {
                 let rel: u8 = self.fetch_data(&AddressingMode::D8).into();
-                let hl: u16 = self.read_reg(&Register::HL).into();
-                self.write_reg(&Register::HL, hl.wrapping_add_signed(rel as i8 as i16));
-                let h = ((hl & 0xF) + (rel as u16 & 0xF)) >= 0x10;
-                let c = ((hl & 0xFF) + (rel as u16 & 0xFF)) >= 0x100;
+                let sp: u16 = self.registers.sp;
+                self.write_reg(&Register::HL, sp.wrapping_add_signed(rel as i8 as i16));
+                let h = ((sp & 0xF) + (rel as u16 & 0xF)) >= 0x10;
+                let c = ((sp & 0xFF) + (rel as u16 & 0xFF)) >= 0x100;
                 set_flags!(0, 0, h, c);
             }
             /* Arithmetic instructions */
@@ -612,6 +670,20 @@ impl<'a> CpuContext<'a> {
                 }
                 self.registers.a = new_data;
                 set_flags!(new_data == 0, 0, (a & 0xF) + (data & 0xF) + old_c > 0xF, c);
+            }
+            Instruction::SBC(mode) => {
+                let data: u8 = self.fetch_data(mode).into();
+                let a = self.registers.a;
+                let old_c: u8 = if get_flag!(c) { 1 } else { 0 };
+
+                let (mut new_data, mut c) = a.overflowing_sub(data);
+                if get_flag!(c) {
+                    let (new_new_data, new_c) = new_data.overflowing_sub(1);
+                    new_data = new_new_data;
+                    c |= new_c;
+                }
+                self.registers.a = new_data;
+                set_flags!(new_data == 0, 0, (a & 0xF) < (data & 0xF) + old_c, c);
             }
             /* Bitwise logic instructions */
             Instruction::AND(mode) => {
@@ -771,7 +843,6 @@ impl<'a> CpuContext<'a> {
                     inst => unimplemented!("cb instruction kind {:?}", inst),
                 }
             }
-
             _ => unimplemented!("instruction kind {:?}", instruction),
         };
     }
@@ -782,6 +853,23 @@ impl<'a> CpuContext<'a> {
             self.execute(instruction);
         } else {
             self.emu_cycles(1);
+
+            if self.interrupt.flag != 0 {
+                self.halted = false
+            }
+        }
+
+        if self.interrupt.master_enabled {
+            if let Some(address) = self.interrupt.handle_interrupts() {
+                self.stack_push_16(self.registers.pc);
+                self.registers.pc = address;
+                self.halted = false;
+            }
+        }
+
+        if self.enabling_ime {
+            self.interrupt.master_enabled = true;
+            self.enabling_ime = false;
         }
 
         return true;

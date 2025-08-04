@@ -1,4 +1,4 @@
-use crate::{bus::BusModule, utils::array};
+use crate::{cpu::BusModule, utils::array};
 use std::io::Read;
 
 static CARTRIDGE_TYPE: [&'static str; 256] = array!["Unknown"; 256;
