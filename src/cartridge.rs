@@ -209,6 +209,6 @@ impl BusModule for Cartridge {
     fn write(&mut self, address: u16, value: u8) {
         // for now ROM ONLY
 
-        unimplemented!();
+        // unimplemented!();
     }
 }

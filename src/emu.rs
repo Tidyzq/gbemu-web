@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn special() -> std::io::Result<()> {
         assert_eq!(
-            Emu::run_test("./roms/01-special.gb".into(), 5000000)?,
+            Emu::run_test("./roms/01-special.gb".into(), 1500000)?,
             "01-special\n\n\nPassed\n",
         );
         Ok(())
@@ -77,4 +77,40 @@ mod tests {
         );
         Ok(())
     }
+
+    #[test]
+    fn op03() -> std::io::Result<()> {
+        assert_eq!(
+            Emu::run_test("./roms/03-op sp,hl.gb".into(), 1500000)?,
+            "03-op sp,hl\n\n\nPassed\n",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn op04() -> std::io::Result<()> {
+        assert_eq!(
+            Emu::run_test("./roms/04-op r,imm.gb".into(), 1500000)?,
+            "04-op r,imm\n\n\nPassed\n",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn op05() -> std::io::Result<()> {
+        assert_eq!(
+            Emu::run_test("./roms/05-op rp.gb".into(), 2000000)?,
+            "05-op rp\n\n\nPassed\n",
+        );
+        Ok(())
+    }
+
+    // #[test]
+    // fn cpu_instrs() -> std::io::Result<()> {
+    //     assert_eq!(
+    //         Emu::run_test("./roms/cpu_instrs.gb".into(), 10000000)?,
+    //         "cpu_instrs\n\n\nPassed\n",
+    //     );
+    //     Ok(())
+    // }
 }

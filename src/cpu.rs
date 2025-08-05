@@ -188,7 +188,7 @@ impl<'a> CpuContext<'a> {
         let lo = (value & 0x00FF) as u8;
         let hi = ((value & 0xFF00) >> 8) as u8;
         self.write_bus(address, lo);
-        self.write_bus(address, hi);
+        self.write_bus(address + 1, hi);
     }
 
     fn read_reg(&self, register: &Register) -> DataKind {
@@ -406,10 +406,17 @@ impl<'a> CpuContext<'a> {
                     _ => unreachable!(),
                 }
             }
-            LeftDataKind::A16(address) => {
-                self.write_bus(*address, data.into());
+            LeftDataKind::A16(address) => match data {
+                DataKind::D8(data) => {
+                    self.write_bus(*address, *data);
                 self.emu_cycles(1);
             }
+                DataKind::D16(data) => {
+                    self.write_bus_16(*address, *data);
+                    self.emu_cycles(2);
+                }
+                _ => unreachable!(),
+            },
         }
     }
 
@@ -714,8 +721,9 @@ impl<'a> CpuContext<'a> {
                 let data: u8 = self.fetch_data(&AddressingMode::D8).into();
                 let sp = self.registers.sp;
                 self.emu_cycles(1);
-                let (new_data, c) = sp.overflowing_add_signed(data as i8 as i16);
+                let (new_data, _) = sp.overflowing_add_signed(data as i8 as i16);
                 let h = (sp & 0x0F) + (data as u16 & 0x0F) >= 0x10;
+                let c = (sp & 0xFF) + (data as u16 & 0xFF) >= 0x100;
                 self.registers.sp = new_data;
                 set_flags!(0, 0, h, c);
             }
@@ -745,13 +753,13 @@ impl<'a> CpuContext<'a> {
                     c |= new_c;
                 }
                 self.registers.a = new_data;
-                set_flags!(new_data == 0, 0, (a & 0xF) < (data & 0xF) + old_c, c);
+                set_flags!(new_data == 0, 1, (a & 0xF) < (data & 0xF) + old_c, c);
             }
             /* Bitwise logic instructions */
             Instruction::AND(mode) => {
                 let data: u8 = self.fetch_data(mode).into();
                 self.registers.a &= data;
-                set_flags!(self.registers.a == 0, 0, 0, 0);
+                set_flags!(self.registers.a == 0, 0, 1, 0);
             }
             Instruction::CP(mode) => {
                 let data: u8 = self.fetch_data(mode).into();
