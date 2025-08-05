@@ -61,7 +61,7 @@ mod tests {
     }
 
     #[test]
-    fn special() -> std::io::Result<()> {
+    fn rom_test01() -> std::io::Result<()> {
         assert_eq!(
             Emu::run_test("./roms/01-special.gb".into(), 1500000)?,
             "01-special\n\n\nPassed\n",
@@ -70,7 +70,7 @@ mod tests {
     }
 
     #[test]
-    fn interrupts() -> std::io::Result<()> {
+    fn rom_test02() -> std::io::Result<()> {
         assert_eq!(
             Emu::run_test("./roms/02-interrupts.gb".into(), 1000000)?,
             "02-interrupts\n\n\nPassed\n",
@@ -79,7 +79,7 @@ mod tests {
     }
 
     #[test]
-    fn op03() -> std::io::Result<()> {
+    fn rom_test03() -> std::io::Result<()> {
         assert_eq!(
             Emu::run_test("./roms/03-op sp,hl.gb".into(), 1500000)?,
             "03-op sp,hl\n\n\nPassed\n",
@@ -88,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn op04() -> std::io::Result<()> {
+    fn rom_test04() -> std::io::Result<()> {
         assert_eq!(
             Emu::run_test("./roms/04-op r,imm.gb".into(), 1500000)?,
             "04-op r,imm\n\n\nPassed\n",
@@ -97,10 +97,64 @@ mod tests {
     }
 
     #[test]
-    fn op05() -> std::io::Result<()> {
+    fn rom_test05() -> std::io::Result<()> {
         assert_eq!(
             Emu::run_test("./roms/05-op rp.gb".into(), 2000000)?,
             "05-op rp\n\n\nPassed\n",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rom_test06() -> std::io::Result<()> {
+        assert_eq!(
+            Emu::run_test("./roms/06-ld r,r.gb".into(), 500000)?,
+            "06-ld r,r\n\n\nPassed\n",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rom_test07() -> std::io::Result<()> {
+        assert_eq!(
+            Emu::run_test("./roms/07-jr,jp,call,ret,rst.gb".into(), 500000)?,
+            "07-jr,jp,call,ret,rst\n\n\nPassed\n",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rom_test08() -> std::io::Result<()> {
+        assert_eq!(
+            Emu::run_test("./roms/08-misc instrs.gb".into(), 500000)?,
+            "08-misc instrs\n\n\nPassed\n",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rom_test09() -> std::io::Result<()> {
+        assert_eq!(
+            Emu::run_test("./roms/09-op r,r.gb".into(), 5000000)?,
+            "09-op r,r\n\n\nPassed\n",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rom_test10() -> std::io::Result<()> {
+        assert_eq!(
+            Emu::run_test("./roms/10-bit ops.gb".into(), 8000000)?,
+            "10-bit ops\n\n\nPassed\n",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rom_test11() -> std::io::Result<()> {
+        assert_eq!(
+            Emu::run_test("./roms/11-op a,(hl).gb".into(), 8000000)?,
+            "11-op a,(hl)\n\n\nPassed\n",
         );
         Ok(())
     }

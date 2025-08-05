@@ -19,15 +19,6 @@ struct Registers {
     sp: u16,
 }
 
-fn is_reg_16(reg: Register) -> bool {
-    match reg {
-        Register::AF | Register::BC | Register::DE | Register::HL | Register::PC | Register::SP => {
-            true
-        }
-        _ => false,
-    }
-}
-
 pub trait BusModule {
     fn read(&self, address: u16) -> u8;
     fn write(&mut self, address: u16, value: u8);
@@ -328,7 +319,10 @@ impl<'a> CpuContext<'a> {
         match addressing_mode {
             AddressingMode::R(register) => self.read_reg(register),
             AddressingMode::MR(register) => {
-                let data = DataKind::D8(self.read_bus(self.read_reg(register).into()));
+                let data = DataKind::D8(self.read_bus(match self.read_reg(register) {
+                    DataKind::D8(address) => 0xFF00 + address as u16,
+                    DataKind::D16(address) => address,
+                }));
                 self.emu_cycles(1);
                 data
             }
@@ -379,7 +373,7 @@ impl<'a> CpuContext<'a> {
                 self.emu_cycles(1);
                 LeftDataKind::A16(0xFF00 | data as u16)
             }
-            AddressingMode::A16 | AddressingMode::D16 => {
+            AddressingMode::A16 => {
                 let data = self.read_bus_16(self.registers.pc);
                 self.registers.pc += 2;
                 self.emu_cycles(2);
@@ -393,14 +387,17 @@ impl<'a> CpuContext<'a> {
         match left_data {
             LeftDataKind::R(register) => self.write_reg(register, data.into()),
             LeftDataKind::MR(register) => {
-                let address = self.read_reg(register);
+                let address = match self.read_reg(register) {
+                    DataKind::D8(address) => 0xFF00 + address as u16,
+                    DataKind::D16(address) => address,
+                };
                 match data {
                     DataKind::D8(data) => {
-                        self.write_bus(address.into(), *data);
+                        self.write_bus(address, *data);
                         self.emu_cycles(1);
                     }
                     DataKind::D16(data) => {
-                        self.write_bus_16(address.into(), *data);
+                        self.write_bus_16(address, *data);
                         self.emu_cycles(2);
                     }
                     _ => unreachable!(),
@@ -825,7 +822,7 @@ impl<'a> CpuContext<'a> {
                                 let data = self.read_bus(self.read_reg(&Register::HL).into());
                                 self.emu_cycles(1);
                                 data
-                            },
+                            }
                             reg => self.read_reg(reg).into(),
                         };
                         d
