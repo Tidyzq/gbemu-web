@@ -23,7 +23,7 @@ impl Timer {
     }
 
     pub fn init(&mut self) {
-        self.div = 0xAc00;
+        self.div = 0xABCC;
         self.tima = 0;
         self.tma = 0;
         self.tac = 0;

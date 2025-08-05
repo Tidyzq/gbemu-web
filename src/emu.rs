@@ -63,7 +63,7 @@ mod tests {
     #[test]
     fn special() -> std::io::Result<()> {
         assert_eq!(
-            Emu::run_test("./roms/01-special.gb".into(), 10000000)?,
+            Emu::run_test("./roms/01-special.gb".into(), 5000000)?,
             "01-special\n\n\nPassed\n",
         );
         Ok(())
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn interrupts() -> std::io::Result<()> {
         assert_eq!(
-            Emu::run_test("./roms/02-interrupts.gb".into(), 10000000)?,
+            Emu::run_test("./roms/02-interrupts.gb".into(), 1000000)?,
             "02-interrupts\n\n\nPassed\n",
         );
         Ok(())
