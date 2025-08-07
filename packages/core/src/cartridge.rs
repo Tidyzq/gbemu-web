@@ -1,5 +1,4 @@
 use crate::{cpu::BusModule, utils::array};
-use std::io::Read;
 
 static CARTRIDGE_TYPE: [&'static str; 256] = array!["Unknown"; 256;
   [0x00] = "ROM ONLY",
@@ -179,11 +178,8 @@ impl std::fmt::Debug for Cartridge {
 }
 
 impl Cartridge {
-    pub fn load_cartridge(filename: &String) -> std::io::Result<Cartridge> {
-        let mut file = std::fs::File::open(filename)?;
-        let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
-        Ok(Cartridge { data })
+    pub fn from(data: Vec<u8>) -> Self {
+        Cartridge { data }
     }
 
     pub fn as_header<'s>(&'s self) -> &'s RomHeader {

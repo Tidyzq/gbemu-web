@@ -1,0 +1,14 @@
+{
+  "name": "@gbemu-web/core",
+  "version": "1.0.0",
+  "description": "",
+  "main": "pkg/gbemu_rs.js",
+  "types": "pkg/gbemu_rs.d.ts",
+  "scripts": {
+    "build": "wasm-pack build --target bundler",
+    "test": "cargo test"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

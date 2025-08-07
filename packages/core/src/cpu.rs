@@ -290,27 +290,26 @@ impl<'a> CpuContext<'a> {
         }
 
         let instruction = Instruction::from(current_opcode);
-        println!(
-            "{:04X?}-{:04X?}: {:<15} ({:02X} {:02X} {:02X}) A: {:02X?} F: {} BC: {:04X?} DE: {:04X?} HL: {:04X?} SP: {:04X?}",
-            self.timer.div,
-            self.registers.pc,
-            format!("{:?}", instruction),
-            current_opcode,
-            self.read_bus(self.registers.pc + 1),
-            self.read_bus(self.registers.pc + 2),
-            self.registers.a,
-            format!(
-                "{}{}{}{}",
-                print_flag!('Z', 7),
-                print_flag!('N', 6),
-                print_flag!('H', 5),
-                print_flag!('C', 4),
-            ),
-            concat_u16!(self.registers.b, self.registers.c),
-            concat_u16!(self.registers.d, self.registers.e),
-            concat_u16!(self.registers.h, self.registers.l),
-            self.registers.sp,
-        );
+        // println!(
+        //     "{:04X?}-{:04X?}: ({:02X} {:02X} {:02X}) A: {:02X?} F: {} BC: {:04X?} DE: {:04X?} HL: {:04X?} SP: {:04X?}",
+        //     self.timer.div,
+        //     self.registers.pc,
+        //     current_opcode,
+        //     self.read_bus(self.registers.pc + 1),
+        //     self.read_bus(self.registers.pc + 2),
+        //     self.registers.a,
+        //     format!(
+        //         "{}{}{}{}",
+        //         print_flag!('Z', 7),
+        //         print_flag!('N', 6),
+        //         print_flag!('H', 5),
+        //         print_flag!('C', 4),
+        //     ),
+        //     concat_u16!(self.registers.b, self.registers.c),
+        //     concat_u16!(self.registers.d, self.registers.e),
+        //     concat_u16!(self.registers.h, self.registers.l),
+        //     self.registers.sp,
+        // );
         self.registers.pc += 1;
         instruction
     }
@@ -406,8 +405,8 @@ impl<'a> CpuContext<'a> {
             LeftDataKind::A16(address) => match data {
                 DataKind::D8(data) => {
                     self.write_bus(*address, *data);
-                self.emu_cycles(1);
-            }
+                    self.emu_cycles(1);
+                }
                 DataKind::D16(data) => {
                     self.write_bus_16(*address, *data);
                     self.emu_cycles(2);

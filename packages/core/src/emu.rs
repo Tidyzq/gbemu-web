@@ -28,11 +28,20 @@ impl<'a> Emu<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Read;
+
     use super::*;
+
+    pub fn load_cartridge(filename: &String) -> std::io::Result<Cartridge> {
+        let mut file = std::fs::File::open(filename)?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data)?;
+        Ok(Cartridge { data })
+    }
 
     impl<'a> Emu<'a> {
         pub fn run_test(filename: String, limit: usize) -> std::io::Result<String> {
-            let mut cartridge = Cartridge::load_cartridge(&filename)?;
+            let mut cartridge = load_cartridge(&filename)?;
             let mut wram = Ram::<0x2000>::create();
             let mut hram = Ram::<0x80>::create();
             let serial = Rc::new(RefCell::new(Serial::create()));
