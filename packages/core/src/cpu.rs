@@ -1,7 +1,7 @@
 use crate::{
     cartridge::Cartridge,
     instruction::{AddressingMode, CBInstruction, Condition, Instruction, Register},
-    interrupt::Interrupt,
+    interrupt::{InterruptContext, InterruptKind},
     io::IO,
     ppu::PPU,
     ram::RAM,
@@ -83,7 +83,7 @@ macro_rules! concat_u16 {
 }
 
 pub struct Bus {
-    interrupt: Interrupt,
+    interrupt: InterruptContext,
     timer: Timer,
     cartridge: Cartridge,
     wram: RAM<0x2000, 0xC000>,
@@ -95,7 +95,7 @@ pub struct Bus {
 impl Bus {
     pub fn new(cartridge: Cartridge) -> Self {
         Bus {
-            interrupt: Interrupt::create(),
+            interrupt: InterruptContext::create(),
             timer: Timer::create(),
             cartridge,
             wram: RAM::create(),
@@ -107,16 +107,15 @@ impl Bus {
 
     pub fn read(&self, address: u16) -> u8 {
         match address {
-            0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.read(address),
+            0x0000..=0x7FFF => self.cartridge.read(address),
             0x8000..=0x9FFF => self.ppu.vram_read(address),
-            0xFE00..=0xFE9F => match self.ppu.dma.active {
-                true => 0xFF,
-                _ => self.ppu.oam_read(address),
-            },
+            0xA000..=0xBFFF => self.cartridge.read(address),
             0xC000..=0xDFFF => self.wram.read(address),
+            0xFE00..=0xFE9F => self.ppu.oam_read(address),
             0xFF00..=0xFF7F => match address {
                 0xFF04..=0xFF07 => self.timer.read(address),
                 0xFF0F => self.interrupt.flag,
+                0xFF40..=0xFF4B => self.ppu.registers_read(address),
                 _ => self.io.read(address),
             },
             0xFF80..=0xFFFE => self.hram.read(address),
@@ -130,17 +129,15 @@ impl Bus {
 
     pub fn write(&mut self, address: u16, value: u8) {
         match address {
-            0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.write(address, value),
+            0x0000..=0x7FFF => self.cartridge.write(address, value),
             0x8000..=0x9FFF => self.ppu.vram_write(address, value),
-            0xFE00..=0xFE9F => match self.ppu.dma.active {
-                true => {},
-                _ => self.ppu.oam_write(address, value),
-            },
+            0xA000..=0xBFFF => self.cartridge.write(address, value),
             0xC000..=0xDFFF => self.wram.write(address, value),
+            0xFE00..=0xFE9F => self.ppu.oam_write(address, value),
             0xFF00..=0xFF7F => match address {
                 0xFF04..=0xFF07 => self.timer.write(address, value),
                 0xFF0F => self.interrupt.flag = value,
-                0xFF46 => self.ppu.dma.start(value),
+                0xFF40..=0xFF4B => self.ppu.registers_write(address, value),
                 _ => self.io.write(address, value),
             },
             0xFF80..=0xFFFE => self.hram.write(address, value),
@@ -161,6 +158,25 @@ impl Bus {
         let hi = ((value & 0xFF00) >> 8) as u8;
         self.write(address, lo);
         self.write(address + 1, hi);
+    }
+
+    pub fn tick(&mut self) {
+        for _ in 0..4 {
+            self.timer.tick(|interrupt| {
+                self.interrupt.request_interrupt(interrupt);
+            });
+            self.ppu.tick(&mut |interrupt| {
+                self.interrupt.request_interrupt(interrupt);
+            });
+        }
+
+        self.ppu.dma_tick(|ppu, from| match from {
+            0x0000..=0x7FFF => self.cartridge.read(from),
+            0x8000..=0x9FFF => ppu.vram_read(from),
+            0xA000..=0xBFFF => self.cartridge.read(from),
+            0xC000..=0xDFFF => self.wram.read(from),
+            _ => unreachable!(),
+        });
     }
 }
 
@@ -290,17 +306,7 @@ impl CpuContext {
 
     fn emu_cycles(&mut self, cycles: u8) {
         for _ in 0..cycles {
-            for _ in 0..4 {
-                if self.bus.timer.tick() {
-                    self.bus
-                        .interrupt
-                        .request_interrupt(crate::interrupt::InterruptKind::Timer);
-                }
-            }
-            if let Some((from, to)) = self.bus.ppu.dma.tick() {
-                let data = self.bus.read(from);
-                self.bus.ppu.oam_write(to, data);
-            }
+            self.bus.tick();
         }
     }
 
@@ -318,9 +324,10 @@ impl CpuContext {
 
         let instruction = Instruction::from(current_opcode);
         // println!(
-        //     "{:04X?}-{:04X?}: ({:02X} {:02X} {:02X}) A: {:02X?} F: {} BC: {:04X?} DE: {:04X?} HL: {:04X?} SP: {:04X?}",
-        //     self.timer.div,
+        //     "{:04X?}-{:04X?}: {:<16} ({:02X} {:02X} {:02X}) A: {:02X?} F: {} BC: {:04X?} DE: {:04X?} HL: {:04X?} SP: {:04X?}",
+        //     self.bus.timer.div,
         //     self.registers.pc,
+        //     format!("{:?}", instruction),
         //     current_opcode,
         //     self.bus.read(self.registers.pc + 1),
         //     self.bus.read(self.registers.pc + 2),
@@ -444,8 +451,6 @@ impl CpuContext {
     }
 
     fn execute(&mut self, instruction: &Instruction) {
-        // print!("{:<16} ", format!("{:?}", instruction));
-
         macro_rules! goto_addr {
             ($cond:expr, $addr:expr, $push:expr) => {{
                 if self.check_condition($cond) {

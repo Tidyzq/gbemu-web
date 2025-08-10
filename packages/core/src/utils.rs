@@ -8,16 +8,22 @@ macro_rules! array {
 
 pub(super) use array;
 
-macro_rules! array_map {
-    ($def:expr; $len:expr; $($val:expr),* $(,)?) => { {
-        let mut a = [$def; $len];
-        let mut idx = 0;
-        $(
-            a[idx] = $val;
-            idx += 1;
-        )*
-        a
-    } }
+macro_rules! bit {
+    ($exp:expr, $n:literal) => {
+        ($exp & (1 << $n)) != 0
+    }
 }
 
-pub(super) use array_map;
+pub(super) use bit;
+
+macro_rules! set_bit {
+    ($exp:expr, $n:literal, $b:expr) => {{
+        if $b {
+            $exp = ($exp | (1 << $n))
+        } else {
+            $exp = ($exp & !(1 << $n))
+        }
+    }}
+}
+
+pub(super) use set_bit;

@@ -1,4 +1,4 @@
-use crate::cpu::BusModule;
+use crate::{cpu::BusModule, interrupt::InterruptKind};
 
 #[derive(Debug)]
 pub struct Timer {
@@ -29,7 +29,10 @@ impl Timer {
         self.tac = 0;
     }
 
-    pub fn tick(&mut self) -> bool {
+    pub fn tick<RequestInt>(&mut self, mut request_interrupt: RequestInt)
+    where
+        RequestInt: FnMut(InterruptKind),
+    {
         self.tick = self.tick.overflowing_add(1).0;
         self.div = self.div.overflowing_add(1).0;
 
@@ -44,10 +47,9 @@ impl Timer {
             self.tima = self.tima.overflowing_add(1).0;
             if self.tima == 0xFF {
                 self.tima = self.tma;
-                return true;
+                request_interrupt(InterruptKind::Timer);
             }
         }
-        false
     }
 
     pub fn read(&self, address: u16) -> u8 {

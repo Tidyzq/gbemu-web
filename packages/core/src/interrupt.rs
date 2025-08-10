@@ -1,22 +1,22 @@
 #[derive(Debug)]
 pub enum InterruptKind {
-    VBlank = 1,
-    LCDStat = 2,
-    Timer = 4,
-    Serial = 8,
-    JoyPad = 16,
+    VBlank = 1 << 0,
+    LCDStat = 1 << 1,
+    Timer = 1 << 2,
+    Serial = 1 << 3,
+    JoyPad = 1 << 4,
 }
 
 #[derive(Debug)]
-pub struct Interrupt {
+pub struct InterruptContext {
     pub master_enabled: bool,
     pub enable: u8,
     pub flag: u8,
 }
 
-impl Interrupt {
+impl InterruptContext {
     pub fn create() -> Self {
-        Interrupt {
+        InterruptContext {
             master_enabled: false,
             enable: 0,
             flag: 0,
