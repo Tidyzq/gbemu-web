@@ -1,7 +1,5 @@
 use std::{cell::RefCell, rc::Rc};
 
-use crate::cpu::BusModule;
-
 #[derive(Debug)]
 pub struct Serial {
     pub data: u8,
@@ -19,20 +17,24 @@ impl Serial {
 
 #[derive(Debug)]
 pub struct IO {
-    pub serial: Rc<RefCell<Serial>>,
+    pub serial: Option<Rc<RefCell<Serial>>>,
 }
 
 impl IO {
-    pub fn create(serial: Rc<RefCell<Serial>>) -> Self {
-        IO { serial }
+    pub fn create() -> Self {
+        IO { serial: None }
     }
-}
 
-impl BusModule for IO {
-    fn read(&self, address: u16) -> u8 {
+    pub fn read(&self, address: u16) -> u8 {
         match address {
-            0xFF01 => self.serial.borrow().data,
-            0xFF02 => self.serial.borrow().control,
+            0xFF01 => match &self.serial {
+                Some(serial) => serial.borrow().data,
+                None => 0,
+            },
+            0xFF02 => match &self.serial {
+                Some(serial) => serial.borrow().control,
+                None => 0,
+            },
             _ => {
                 // println!("Unsupported IO read at {:X?}", address);
                 0
@@ -40,10 +42,16 @@ impl BusModule for IO {
         }
     }
 
-    fn write(&mut self, address: u16, value: u8) {
+    pub fn write(&mut self, address: u16, value: u8) {
         match address {
-            0xFF01 => self.serial.borrow_mut().data = value,
-            0xFF02 => self.serial.borrow_mut().control = value,
+            0xFF01 => match &self.serial {
+                Some(serial) => serial.borrow_mut().data = value,
+                None => {},
+            },
+            0xFF02 => match &self.serial {
+                Some(serial) => serial.borrow_mut().control = value,
+                None => {},
+            },
             _ => {} // _ => println!("Unsupported IO write at {:X?} = {:X?}", address, value),
         }
     }

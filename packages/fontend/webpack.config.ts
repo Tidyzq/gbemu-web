@@ -1,7 +1,7 @@
 import path from "path";
 import webpack from "webpack";
-import HtmlWebpackPlugin from 'html-webpack-plugin'
-import 'webpack-dev-server';
+import HtmlWebpackPlugin from "html-webpack-plugin";
+import "webpack-dev-server";
 
 const config: webpack.Configuration = {
   entry: "./src/index.tsx",
@@ -12,6 +12,10 @@ const config: webpack.Configuration = {
   devServer: {
     static: {
       directory: path.join(__dirname, "public"),
+    },
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "credentialless",
     },
     compress: true,
     port: 9000,

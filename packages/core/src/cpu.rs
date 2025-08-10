@@ -1,7 +1,10 @@
 use crate::{
+    cartridge::Cartridge,
     instruction::{AddressingMode, CBInstruction, Condition, Instruction, Register},
     interrupt::Interrupt,
     io::IO,
+    ppu::PPU,
+    ram::RAM,
     timer::Timer,
 };
 
@@ -22,23 +25,6 @@ struct Registers {
 pub trait BusModule {
     fn read(&self, address: u16) -> u8;
     fn write(&mut self, address: u16, value: u8);
-}
-
-pub struct CpuContext<'a> {
-    pub registers: Registers,
-
-    pub halted: bool,
-    pub stepping: bool,
-
-    pub enabling_ime: bool,
-    interrupt: Interrupt,
-
-    timer: Timer,
-
-    cartridge: &'a mut dyn BusModule,
-    wram: &'a mut dyn BusModule,
-    hram: &'a mut dyn BusModule,
-    io: &'a mut IO,
 }
 
 #[derive(Debug)]
@@ -96,13 +82,101 @@ macro_rules! concat_u16 {
     };
 }
 
-impl<'a> CpuContext<'a> {
-    pub fn create(
-        cartridge: &'a mut dyn BusModule,
-        wram: &'a mut dyn BusModule,
-        hram: &'a mut dyn BusModule,
-        io: &'a mut IO,
-    ) -> Self {
+pub struct Bus {
+    interrupt: Interrupt,
+    timer: Timer,
+    cartridge: Cartridge,
+    wram: RAM<0x2000, 0xC000>,
+    hram: RAM<0x80, 0xFF80>,
+    pub ppu: PPU,
+    pub io: IO,
+}
+
+impl Bus {
+    pub fn new(cartridge: Cartridge) -> Self {
+        Bus {
+            interrupt: Interrupt::create(),
+            timer: Timer::create(),
+            cartridge,
+            wram: RAM::create(),
+            hram: RAM::create(),
+            ppu: PPU::create(),
+            io: IO::create(),
+        }
+    }
+
+    pub fn read(&self, address: u16) -> u8 {
+        match address {
+            0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.read(address),
+            0x8000..=0x9FFF => self.ppu.vram_read(address),
+            0xFE00..=0xFE9F => match self.ppu.dma.active {
+                true => 0xFF,
+                _ => self.ppu.oam_read(address),
+            },
+            0xC000..=0xDFFF => self.wram.read(address),
+            0xFF00..=0xFF7F => match address {
+                0xFF04..=0xFF07 => self.timer.read(address),
+                0xFF0F => self.interrupt.flag,
+                _ => self.io.read(address),
+            },
+            0xFF80..=0xFFFE => self.hram.read(address),
+            0xFFFF => self.interrupt.enable,
+            _ => {
+                // println!("Unsupported bus read at 0x{:X?}", address);
+                0
+            }
+        }
+    }
+
+    pub fn write(&mut self, address: u16, value: u8) {
+        match address {
+            0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.write(address, value),
+            0x8000..=0x9FFF => self.ppu.vram_write(address, value),
+            0xFE00..=0xFE9F => match self.ppu.dma.active {
+                true => {},
+                _ => self.ppu.oam_write(address, value),
+            },
+            0xC000..=0xDFFF => self.wram.write(address, value),
+            0xFF00..=0xFF7F => match address {
+                0xFF04..=0xFF07 => self.timer.write(address, value),
+                0xFF0F => self.interrupt.flag = value,
+                0xFF46 => self.ppu.dma.start(value),
+                _ => self.io.write(address, value),
+            },
+            0xFF80..=0xFFFE => self.hram.write(address, value),
+            0xFFFF => self.interrupt.enable = value,
+            _ => {} // _ => println!("Unsupported bus write at 0x{:X?} = {:X?}", address, value),
+        }
+    }
+
+    fn read_16(&self, address: u16) -> u16 {
+        let lo = self.read(address) as u16;
+        let hi = self.read(address + 1) as u16;
+
+        lo | (hi << 8)
+    }
+
+    fn write_16(&mut self, address: u16, value: u16) {
+        let lo = (value & 0x00FF) as u8;
+        let hi = ((value & 0xFF00) >> 8) as u8;
+        self.write(address, lo);
+        self.write(address + 1, hi);
+    }
+}
+
+pub struct CpuContext {
+    pub registers: Registers,
+
+    pub halted: bool,
+    pub stepping: bool,
+
+    pub enabling_ime: bool,
+
+    pub bus: Bus,
+}
+
+impl CpuContext {
+    pub fn create(cartridge: Cartridge) -> Self {
         CpuContext {
             registers: Registers::default(),
 
@@ -110,14 +184,8 @@ impl<'a> CpuContext<'a> {
             stepping: false,
 
             enabling_ime: false,
-            interrupt: Interrupt::create(),
 
-            timer: Timer::create(),
-
-            cartridge,
-            wram,
-            hram,
-            io,
+            bus: Bus::new(cartridge),
         }
     }
 
@@ -133,53 +201,6 @@ impl<'a> CpuContext<'a> {
         self.registers.pc = 0x0100;
         self.registers.sp = 0xFFFE;
         self.halted = false;
-    }
-
-    pub fn read_bus(&self, address: u16) -> u8 {
-        match address {
-            0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.read(address),
-            0xC000..=0xDFFF => self.wram.read(address - 0xC000),
-            0xFF00..=0xFF7F => match address {
-                0xFF04..=0xFF07 => self.timer.read(address),
-                0xFF0F => self.interrupt.flag,
-                _ => self.io.read(address),
-            },
-            0xFF80..=0xFFFE => self.hram.read(address - 0xFF80),
-            0xFFFF => self.interrupt.enable,
-            _ => {
-                // println!("Unsupported bus read at 0x{:X?}", address);
-                0
-            }
-        }
-    }
-
-    pub fn write_bus(&mut self, address: u16, value: u8) {
-        match address {
-            0x0000..=0x7FFF | 0xA000..=0xBFFF => self.cartridge.write(address, value),
-            0xC000..=0xDFFF => self.wram.write(address - 0xC000, value),
-            0xFF00..=0xFF7F => match address {
-                0xFF04..=0xFF07 => self.timer.write(address, value),
-                0xFF0F => self.interrupt.flag = value,
-                _ => self.io.write(address, value),
-            },
-            0xFF80..=0xFFFE => self.hram.write(address - 0xFF80, value),
-            0xFFFF => self.interrupt.enable = value,
-            _ => {} // _ => println!("Unsupported bus write at 0x{:X?} = {:X?}", address, value),
-        }
-    }
-
-    fn read_bus_16(&self, address: u16) -> u16 {
-        let lo = self.read_bus(address) as u16;
-        let hi = self.read_bus(address + 1) as u16;
-
-        lo | (hi << 8)
-    }
-
-    fn write_bus_16(&mut self, address: u16, value: u16) {
-        let lo = (value & 0x00FF) as u8;
-        let hi = ((value & 0xFF00) >> 8) as u8;
-        self.write_bus(address, lo);
-        self.write_bus(address + 1, hi);
     }
 
     fn read_reg(&self, register: &Register) -> DataKind {
@@ -250,14 +271,14 @@ impl<'a> CpuContext<'a> {
 
     pub fn stack_push(&mut self, data: u8) {
         self.registers.sp -= 1;
-        self.write_bus(self.registers.sp, data);
+        self.bus.write(self.registers.sp, data);
     }
     pub fn stack_push_16(&mut self, data: u16) {
         self.stack_push(((data >> 8) & 0xFF) as u8);
         self.stack_push((data & 0xFF) as u8);
     }
     pub fn stack_pop(&mut self) -> u8 {
-        let data = self.read_bus(self.registers.sp);
+        let data = self.bus.read(self.registers.sp);
         self.registers.sp += 1;
         data
     }
@@ -268,17 +289,23 @@ impl<'a> CpuContext<'a> {
     }
 
     fn emu_cycles(&mut self, cycles: u8) {
-        let n = cycles as usize * 4;
-        for _ in 0..n {
-            if self.timer.tick() {
-                self.interrupt
-                    .request_interrupt(crate::interrupt::InterruptKind::Timer);
+        for _ in 0..cycles {
+            for _ in 0..4 {
+                if self.bus.timer.tick() {
+                    self.bus
+                        .interrupt
+                        .request_interrupt(crate::interrupt::InterruptKind::Timer);
+                }
+            }
+            if let Some((from, to)) = self.bus.ppu.dma.tick() {
+                let data = self.bus.read(from);
+                self.bus.ppu.oam_write(to, data);
             }
         }
     }
 
     fn fetch_instruction(&mut self) -> &'static Instruction {
-        let current_opcode = self.read_bus(self.registers.pc);
+        let current_opcode = self.bus.read(self.registers.pc);
         macro_rules! print_flag {
             ($c:literal, $i:literal) => {
                 if self.registers.f & (1 << $i) != 0 {
@@ -295,8 +322,8 @@ impl<'a> CpuContext<'a> {
         //     self.timer.div,
         //     self.registers.pc,
         //     current_opcode,
-        //     self.read_bus(self.registers.pc + 1),
-        //     self.read_bus(self.registers.pc + 2),
+        //     self.bus.read(self.registers.pc + 1),
+        //     self.bus.read(self.registers.pc + 2),
         //     self.registers.a,
         //     format!(
         //         "{}{}{}{}",
@@ -318,7 +345,7 @@ impl<'a> CpuContext<'a> {
         match addressing_mode {
             AddressingMode::R(register) => self.read_reg(register),
             AddressingMode::MR(register) => {
-                let data = DataKind::D8(self.read_bus(match self.read_reg(register) {
+                let data = DataKind::D8(self.bus.read(match self.read_reg(register) {
                     DataKind::D8(address) => 0xFF00 + address as u16,
                     DataKind::D16(address) => address,
                 }));
@@ -326,12 +353,12 @@ impl<'a> CpuContext<'a> {
                 data
             }
             AddressingMode::A8 | AddressingMode::D8 => {
-                let data = self.read_bus(self.registers.pc);
+                let data = self.bus.read(self.registers.pc);
                 self.registers.pc += 1;
                 self.emu_cycles(1);
                 match addressing_mode {
                     AddressingMode::A8 => {
-                        let data = DataKind::D8(self.read_bus(0xFF00 | data as u16));
+                        let data = DataKind::D8(self.bus.read(0xFF00 | data as u16));
                         self.emu_cycles(1);
                         data
                     }
@@ -340,18 +367,18 @@ impl<'a> CpuContext<'a> {
                 }
             }
             AddressingMode::A16 | AddressingMode::D16 => {
-                let lo = self.read_bus(self.registers.pc) as u16;
+                let lo = self.bus.read(self.registers.pc) as u16;
                 self.registers.pc += 1;
                 self.emu_cycles(1);
 
-                let hi = self.read_bus(self.registers.pc) as u16;
+                let hi = self.bus.read(self.registers.pc) as u16;
                 self.registers.pc += 1;
                 self.emu_cycles(1);
 
                 let data = lo | (hi << 8);
                 match addressing_mode {
                     AddressingMode::A16 => {
-                        let data = DataKind::D8(self.read_bus(data));
+                        let data = DataKind::D8(self.bus.read(data));
                         self.emu_cycles(1);
                         data
                     }
@@ -367,13 +394,13 @@ impl<'a> CpuContext<'a> {
             AddressingMode::R(register) => LeftDataKind::R(*register),
             AddressingMode::MR(register) => LeftDataKind::MR(*register),
             AddressingMode::A8 => {
-                let data = self.read_bus(self.registers.pc);
+                let data = self.bus.read(self.registers.pc);
                 self.registers.pc += 1;
                 self.emu_cycles(1);
                 LeftDataKind::A16(0xFF00 | data as u16)
             }
             AddressingMode::A16 => {
-                let data = self.read_bus_16(self.registers.pc);
+                let data = self.bus.read_16(self.registers.pc);
                 self.registers.pc += 2;
                 self.emu_cycles(2);
                 LeftDataKind::A16(data)
@@ -392,11 +419,11 @@ impl<'a> CpuContext<'a> {
                 };
                 match data {
                     DataKind::D8(data) => {
-                        self.write_bus(address, *data);
+                        self.bus.write(address, *data);
                         self.emu_cycles(1);
                     }
                     DataKind::D16(data) => {
-                        self.write_bus_16(address, *data);
+                        self.bus.write_16(address, *data);
                         self.emu_cycles(2);
                     }
                     _ => unreachable!(),
@@ -404,11 +431,11 @@ impl<'a> CpuContext<'a> {
             }
             LeftDataKind::A16(address) => match data {
                 DataKind::D8(data) => {
-                    self.write_bus(*address, *data);
+                    self.bus.write(*address, *data);
                     self.emu_cycles(1);
                 }
                 DataKind::D16(data) => {
-                    self.write_bus_16(*address, *data);
+                    self.bus.write_16(*address, *data);
                     self.emu_cycles(2);
                 }
                 _ => unreachable!(),
@@ -509,7 +536,7 @@ impl<'a> CpuContext<'a> {
                 /* 由于 EI 指令要求在下一个指令结束才设置 IME，先存到 enabling_ime */
                 self.enabling_ime = true;
             }
-            Instruction::DI => self.interrupt.master_enabled = false,
+            Instruction::DI => self.bus.interrupt.master_enabled = false,
             Instruction::HALT => self.halted = true,
             /* Jumps and subroutine instructions */
             Instruction::JP(condition) => {
@@ -550,7 +577,7 @@ impl<'a> CpuContext<'a> {
                 );
             }
             Instruction::RETI => {
-                self.interrupt.master_enabled = true;
+                self.bus.interrupt.master_enabled = true;
                 goto_addr!(
                     &Condition::None,
                     {
@@ -607,14 +634,14 @@ impl<'a> CpuContext<'a> {
                 // LD (HL+),A
                 let hl = self.read_reg(&Register::HL).into();
                 let a = self.registers.a;
-                self.write_bus(hl, a);
+                self.bus.write(hl, a);
                 self.emu_cycles(1);
                 self.write_reg(&Register::HL, hl + 1);
             }
             Instruction::LDI2 => {
                 // LD A,(HL+)
                 let hl = self.read_reg(&Register::HL).into();
-                self.registers.a = self.read_bus(hl);
+                self.registers.a = self.bus.read(hl);
                 self.emu_cycles(1);
                 self.write_reg(&Register::HL, hl + 1);
             }
@@ -622,14 +649,14 @@ impl<'a> CpuContext<'a> {
                 // LD (HL-),A
                 let hl = self.read_reg(&Register::HL).into();
                 let a = self.registers.a;
-                self.write_bus(hl, a);
+                self.bus.write(hl, a);
                 self.emu_cycles(1);
                 self.write_reg(&Register::HL, hl - 1);
             }
             Instruction::LDD2 => {
                 // LD A,(HL-)
                 let hl = self.read_reg(&Register::HL).into();
-                self.registers.a = self.read_bus(hl);
+                self.registers.a = self.bus.read(hl);
                 self.emu_cycles(1);
                 self.write_reg(&Register::HL, hl - 1);
             }
@@ -669,20 +696,20 @@ impl<'a> CpuContext<'a> {
             Instruction::INCHL => {
                 let register = &Register::HL;
                 let addr: u16 = self.read_reg(register).into();
-                let (data, _) = self.read_bus(addr).overflowing_add(1);
+                let (data, _) = self.bus.read(addr).overflowing_add(1);
                 self.emu_cycles(1);
 
-                self.write_bus(addr, data);
+                self.bus.write(addr, data);
                 self.emu_cycles(1);
 
                 set_flags!(data == 0, 0, (data & 0x0F) == 0, -1);
             }
             Instruction::DECHL => {
                 let addr: u16 = self.read_reg(&Register::HL).into();
-                let (data, _) = self.read_bus(addr).overflowing_sub(1);
+                let (data, _) = self.bus.read(addr).overflowing_sub(1);
                 self.emu_cycles(1);
 
-                self.write_bus(addr, data);
+                self.bus.write(addr, data);
                 self.emu_cycles(1);
 
                 set_flags!(data == 0, 1, (data & 0x0F) == 0x0F, -1);
@@ -818,7 +845,7 @@ impl<'a> CpuContext<'a> {
                     ($r:expr) => {{
                         let d: u8 = match $r {
                             Register::HL => {
-                                let data = self.read_bus(self.read_reg(&Register::HL).into());
+                                let data = self.bus.read(self.read_reg(&Register::HL).into());
                                 self.emu_cycles(1);
                                 data
                             }
@@ -833,7 +860,7 @@ impl<'a> CpuContext<'a> {
                         let val = $v;
                         match $r {
                             Register::HL => {
-                                self.write_bus(self.read_reg(&Register::HL).into(), val);
+                                self.bus.write(self.read_reg(&Register::HL).into(), val);
                                 self.emu_cycles(1);
                             }
                             reg => self.write_reg(reg, val as u16),
@@ -927,13 +954,13 @@ impl<'a> CpuContext<'a> {
         } else {
             self.emu_cycles(1);
 
-            if self.interrupt.flag != 0 {
+            if self.bus.interrupt.flag != 0 {
                 self.halted = false
             }
         }
 
-        if self.interrupt.master_enabled {
-            if let Some(address) = self.interrupt.handle_interrupts() {
+        if self.bus.interrupt.master_enabled {
+            if let Some(address) = self.bus.interrupt.handle_interrupts() {
                 self.stack_push_16(self.registers.pc);
                 self.registers.pc = address;
                 self.halted = false;
@@ -941,7 +968,7 @@ impl<'a> CpuContext<'a> {
         }
 
         if self.enabling_ime {
-            self.interrupt.master_enabled = true;
+            self.bus.interrupt.master_enabled = true;
             self.enabling_ime = false;
         }
 
