@@ -57,16 +57,28 @@ impl ScreenWriter for SharedArrayBufferWriter {
 #[wasm_bindgen]
 impl Emu {
     #[wasm_bindgen(constructor)]
-    pub fn create(cart_data: &mut [u8], debug_buffer: SharedArrayBuffer) -> Self {
+    pub fn create(cart_data: &mut [u8]) -> Self {
         set_panic_hook();
         let cartridge = Cartridge::from(Vec::from(cart_data));
-        let mut cpu = CpuContext::create(cartridge);
-
-        cpu.bus
-            .ppu
-            .set_debug_screen_writer(Box::new(SharedArrayBufferWriter::create(debug_buffer)));
+        let cpu = CpuContext::create(cartridge);
 
         Emu { cpu }
+    }
+
+    #[wasm_bindgen]
+    pub fn attach_screen_buffer(&mut self, buffer: SharedArrayBuffer) {
+        self.cpu
+            .bus
+            .ppu
+            .set_screen_writer(Box::new(SharedArrayBufferWriter::create(buffer)));
+    }
+
+    #[wasm_bindgen]
+    pub fn attach_debug_screen_buffer(&mut self, buffer: SharedArrayBuffer) {
+        self.cpu
+            .bus
+            .ppu
+            .set_debug_screen_writer(Box::new(SharedArrayBufferWriter::create(buffer)));
     }
 
     #[wasm_bindgen]

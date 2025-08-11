@@ -2,7 +2,7 @@ use std::ops::RangeInclusive;
 
 use crate::{
     interrupt::InterruptKind,
-    utils::{bit, set_bit},
+    utils::{bit, set_bit, RingBuffer},
 };
 
 static LINES_PER_FRAME: usize = 154;
@@ -10,7 +10,29 @@ static OAM_TICKS: usize = 80;
 static TICKS_PER_LINE: usize = 456;
 static Y_RES: usize = 144;
 static X_RES: usize = 160;
-static VIDEO_BUFFER_SIZE: usize = Y_RES * X_RES;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RGBA {
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+}
+
+impl RGBA {
+    pub const fn new(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+}
+
+/* R G B A */
+static TILE_COLORS: [RGBA; 4] = [
+    RGBA::new(0xFF, 0xFF, 0xFF, 0xFF),
+    RGBA::new(0xAA, 0xAA, 0xAA, 0xFF),
+    RGBA::new(0x55, 0x55, 0x55, 0xFF),
+    RGBA::new(0x00, 0x00, 0x00, 0xFF),
+];
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -47,20 +69,14 @@ pub struct PPU {
 
     current_frame: usize,
     line_ticks: usize,
-    video_buffer: [u32; VIDEO_BUFFER_SIZE],
 
+    screen_writer: Option<Box<dyn ScreenWriter>>,
     debug_screen_writer: Option<Box<dyn ScreenWriter>>,
+
     pub dma: DMA,
     pub lcd: LCD,
+    pfc: PixelFIFOContext,
 }
-
-/* R G B A */
-static TILE_COLORS: [[u8; 4]; 4] = [
-    [0xFF, 0xFF, 0xFF, 0xFF],
-    [0xAA, 0xAA, 0xAA, 0xFF],
-    [0x55, 0x55, 0x55, 0xFF],
-    [0x00, 0x00, 0x00, 0xFF],
-];
 
 impl PPU {
     pub fn create() -> Self {
@@ -70,12 +86,18 @@ impl PPU {
 
             current_frame: 0,
             line_ticks: 0,
-            video_buffer: [0; VIDEO_BUFFER_SIZE],
 
+            screen_writer: None,
             debug_screen_writer: None,
+
             dma: DMA::new(),
             lcd: LCD::new(),
+            pfc: PixelFIFOContext::new(),
         }
+    }
+
+    pub fn set_screen_writer(&mut self, writer: Box<dyn ScreenWriter>) {
+        self.screen_writer = Some(writer);
     }
 
     pub fn set_debug_screen_writer(&mut self, writer: Box<dyn ScreenWriter>) {
@@ -115,44 +137,135 @@ impl PPU {
     {
         self.line_ticks += 1;
 
-        // println!("line_ticks={:X?} mode={:?}", self.line_ticks, self.lcd.get_ppu_mode());
+        println!("line_ticks={:X?} mode={:?}", self.line_ticks, self.lcd.get_ppu_mode());
 
         match self.lcd.get_ppu_mode() {
-            PPUMode::HBlank if self.line_ticks >= TICKS_PER_LINE => {
-                self.increment_ly(request_interrupt);
-                if self.lcd.ly as usize >= Y_RES {
-                    self.lcd.set_ppu_mode(PPUMode::VBlank);
-                    request_interrupt(InterruptKind::VBlank);
+            PPUMode::HBlank => {
+                if self.line_ticks >= TICKS_PER_LINE {
+                    self.increment_ly(request_interrupt);
+                    if self.lcd.ly as usize >= Y_RES {
+                        self.lcd.set_ppu_mode(PPUMode::VBlank);
+                        request_interrupt(InterruptKind::VBlank);
 
-                    if self.lcd.is_mode1_int_selected() {
+                        if self.lcd.is_mode1_int_selected() {
+                            request_interrupt(InterruptKind::LCDStat)
+                        }
+
+                        self.current_frame += 1;
+                        self.lcd.ly = 0;
+
+                        // TODO FPS
+                    } else {
+                        self.lcd.set_ppu_mode(PPUMode::OAMScan);
+                    }
+                    self.line_ticks = 0;
+                }
+            }
+            PPUMode::VBlank => {
+                if self.line_ticks >= TICKS_PER_LINE {
+                    self.increment_ly(request_interrupt);
+                    if self.lcd.ly as usize >= LINES_PER_FRAME {
+                        self.lcd.set_ppu_mode(PPUMode::OAMScan);
+                        self.lcd.ly = 0;
+                    }
+                    self.line_ticks = 0;
+                }
+            }
+            PPUMode::OAMScan => {
+                if self.line_ticks >= OAM_TICKS {
+                    {
+                        self.lcd.set_ppu_mode(PPUMode::Drawing);
+                        self.pfc.init();
+                    }
+                }
+            }
+            PPUMode::Drawing => {
+                println!("  drawing {:?} {:?}", self.pfc.fetch_state, self.pfc.pushed_x);
+                self.pipeline_process();
+                if self.pfc.pushed_x as usize >= X_RES {
+                    self.pipeline_reset();
+                    self.lcd.set_ppu_mode(PPUMode::HBlank);
+                    if self.lcd.is_mode0_int_selected() {
                         request_interrupt(InterruptKind::LCDStat)
                     }
-
-                    self.current_frame += 1;
-                    self.lcd.ly = 0;
-
-                    // TODO FPS
-                } else {
-                    self.lcd.set_ppu_mode(PPUMode::OAMScan);
                 }
-                self.line_ticks = 0;
-            }
-            PPUMode::VBlank if self.line_ticks >= TICKS_PER_LINE => {
-                self.increment_ly(request_interrupt);
-                if self.lcd.ly as usize >= LINES_PER_FRAME {
-                    self.lcd.set_ppu_mode(PPUMode::OAMScan);
-                    self.lcd.ly = 0;
-                }
-                self.line_ticks = 0;
-            }
-            PPUMode::OAMScan if self.line_ticks >= OAM_TICKS => {
-                self.lcd.set_ppu_mode(PPUMode::Drawing);
-            }
-            PPUMode::Drawing if self.line_ticks >= OAM_TICKS + 172 /* TODO dynamic ticks */ => {
-                self.lcd.set_ppu_mode(PPUMode::HBlank);
+                // println!("  drawing end");
             }
             _ => {}
         }
+    }
+
+    fn pipeline_process(&mut self) {
+        if self.line_ticks & 1 == 0 {
+            match self.pfc.fetch_state {
+                FetchState::Tile => {
+                    let (map_x, map_y) = if self.lcd.is_bg_window_enabled() {
+                        let map_y = ((self.lcd.ly as u16 + self.lcd.scroll_y as u16) / 8) as u8;
+                        let map_x = ((self.pfc.fetch_x as u16 + self.lcd.scroll_x as u16) / 8) as u8;
+                        (map_x, map_y)
+                    } else {
+                        (0, 0) // TOD disable
+                    };
+                    let start = *self.lcd.get_bg_tile_map_area().start() as u16;
+                    let tile_idx = self.vram_read(start + map_x as u16 + map_y as u16 * 32);
+                    self.pfc.fetch_state = FetchState::Data0(tile_idx);
+                    self.pfc.fetch_x += 8;
+                }
+                FetchState::Data0(tile_idx) => {
+                    let start = *self.lcd.get_bg_window_tile_data_area().start() as u16;
+                    let tile_y = ((self.lcd.ly as u16 + self.lcd.scroll_y as u16) % 8) as u8 * 2;
+                    let data0 = self.vram_read(start + tile_idx as u16 * 16 + tile_y as u16);
+                    self.pfc.fetch_state = FetchState::Data1(tile_idx, data0);
+                }
+                FetchState::Data1(tile_idx, data0) => {
+                    let start = *self.lcd.get_bg_window_tile_data_area().start() as u16;
+                    let tile_y = ((self.lcd.ly as u16 + self.lcd.scroll_y as u16) % 8) as u8 * 2;
+                    let data1 = self.vram_read(start + tile_idx as u16 * 16 + tile_y as u16 + 1);
+                    self.pfc.fetch_state = FetchState::Idle(data0, data1);
+                }
+                FetchState::Idle(data0, data1) => {
+                    self.pfc.fetch_state = FetchState::Push(data0, data1);
+                }
+                FetchState::Push(data0, data1) => {
+                    if self.pfc.pixel_fifo.len() > 8 {
+                        return
+                    }
+                    let x = self.pfc.fetch_x as i32 - (8 - (self.lcd.scroll_x as i32 % 8));
+
+                    for i in 0..8 {
+                        let bit = 7 - i;
+                        let hi = data0 >> bit & 1;
+                        let lo = (data1 >> bit & 1) << 1;
+                        let color = &self.lcd.bg_colors[hi as usize | lo as usize];
+
+                        if x >= 0 {
+                            self.pfc.pixel_fifo.push(color.clone());
+                            self.pfc.fifo_x += 1;
+                        }
+                    }
+
+                    self.pfc.fetch_state = FetchState::Tile;
+                }
+            }
+        }
+        if self.pfc.pixel_fifo.len() > 8 {
+            let pixel = self.pfc.pixel_fifo.pop().unwrap();
+
+            if self.pfc.line_x >= (self.lcd.scroll_x % 8) {
+                let idx: usize = (self.pfc.pushed_x as usize + self.lcd.ly as usize * X_RES) * 4;
+                if let Some(screen_writer) = &mut self.screen_writer {
+                    screen_writer.set_index(idx + 0 , pixel.r);
+                    screen_writer.set_index(idx + 1 , pixel.g);
+                    screen_writer.set_index(idx + 2 , pixel.b);
+                    screen_writer.set_index(idx + 3 , pixel.a);
+                }
+                self.pfc.pushed_x += 1;
+            }
+        }
+    }
+
+    fn pipeline_reset(&mut self) {
+        self.pfc.pixel_fifo.clear();
     }
 
     pub fn oam_read(&self, address: u16) -> u8 {
@@ -201,7 +314,7 @@ impl PPU {
     }
 
     pub fn registers_write(&mut self, address: u16, value: u8) {
-        println!("PPU registers write ({:X?})={:X?}", address, value);
+        // println!("PPU registers write ({:X?})={:X?}", address, value);
         match address {
             0xFF40 => self.lcd.control = value,
             0xFF41 => self.lcd.status = value,
@@ -246,11 +359,12 @@ impl PPU {
 
                 let screen_index = ((tile_y * 16 * 8 * 8 + line * 16 * 8 + tile_x * 8) + bit) * 4;
                 let color_index = hi | lo;
-                let color = TILE_COLORS[color_index as usize];
+                let color = &TILE_COLORS[color_index as usize];
 
-                for i in 0..=3 {
-                    debug_screen_writer.set_index(screen_index + i, color[i]);
-                }
+                debug_screen_writer.set_index(screen_index + 0, color.r);
+                debug_screen_writer.set_index(screen_index + 1, color.g);
+                debug_screen_writer.set_index(screen_index + 2, color.b);
+                debug_screen_writer.set_index(screen_index + 3, color.a);
             }
         }
     }
@@ -274,7 +388,7 @@ impl DMA {
     }
 
     pub fn start(&mut self, start: u8) {
-        println!("DMA begin with {:X?}", start);
+        // println!("DMA begin with {:X?}", start);
         self.active = true;
         self.byte = 0;
         self.start_delay = 2;
@@ -294,13 +408,13 @@ impl DMA {
         let from = (self.value & 0xFF) as u16 * 0x100 + self.byte as u16;
         let to = self.byte as u16;
 
-        println!("DMA copy from {:X?} to {:X?}", from, to);
+        // println!("DMA copy from {:X?} to {:X?}", from, to);
 
         self.byte += 1;
         self.active = self.byte < 0xA0;
 
         if !self.active {
-            println!("DMA end");
+            // println!("DMA end");
         }
 
         Some((from, to))
@@ -319,9 +433,9 @@ pub struct LCD {
     window_y: u8,
     window_x: u8,
 
-    bg_colors: [[u8; 4]; 4],
-    sp1_colors: [[u8; 4]; 4],
-    sp2_colors: [[u8; 4]; 4],
+    bg_colors: [RGBA; 4],
+    sp1_colors: [RGBA; 4],
+    sp2_colors: [RGBA; 4],
 }
 
 #[derive(Debug)]
@@ -456,9 +570,49 @@ impl LCD {
         set_bit!(self.status, 2, equals)
     }
 
-    fn update_palette(color: &mut [[u8; 4]; 4], data: u8) {
+    fn update_palette(color: &mut [RGBA; 4], data: u8) {
         for i in 0..4 {
             color[i] = TILE_COLORS[(data as usize >> (i * 2)) & 0b11];
         }
+    }
+}
+
+#[derive(Debug)]
+enum FetchState {
+    Tile,
+    Data0(u8),
+    Data1(u8, u8),
+    Idle(u8, u8),
+    Push(u8, u8),
+}
+
+struct PixelFIFOContext {
+    fetch_state: FetchState,
+    pixel_fifo: RingBuffer<RGBA>,
+    line_x: u8,
+    /* 当前行已经写入 screen_buffer 的 x */
+    pushed_x: u8,
+    fetch_x: u8,
+    fifo_x: u8,
+}
+
+impl PixelFIFOContext {
+    pub fn new() -> Self {
+        Self {
+            fetch_state: FetchState::Tile,
+            pixel_fifo: RingBuffer::new(32),
+            line_x: 0,
+            pushed_x: 0,
+            fetch_x: 0,
+            fifo_x: 0,
+        }
+    }
+
+    fn init(&mut self) {
+        self.fetch_state = FetchState::Tile;
+        self.line_x = 0;
+        self.pushed_x = 0;
+        self.fetch_x = 0;
+        self.fifo_x = 0;
     }
 }

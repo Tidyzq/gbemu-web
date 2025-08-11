@@ -1,5 +1,11 @@
 import { render } from "solid-js/web";
 
+const Y_RES = 144;
+const X_RES = 160;
+
+const DEBUG_Y_RES = 32 * 8;
+const DEBUG_X_RES = 16 * 8;
+
 const worker = new Worker(new URL("./worker.ts", import.meta.url));
 
 const initCanvas = (canvas: HTMLCanvasElement, width: number, height: number) => {
@@ -50,8 +56,8 @@ const Emu = () => {
     });
     const arrayBuffer = reader.result as ArrayBuffer;
 
-    const mainBuffer = initCanvas(mainScreenCanvas!, 300, 300)
-    const debugBuffer = initCanvas(debugScreenCanvas!, 16 * 8, 32 * 8)
+    const mainBuffer = initCanvas(mainScreenCanvas!, X_RES, Y_RES)
+    const debugBuffer = initCanvas(debugScreenCanvas!, DEBUG_X_RES, DEBUG_Y_RES)
 
     worker.postMessage(
       {
@@ -73,11 +79,11 @@ const Emu = () => {
   return (
     <>
       <canvas
-        style="width: 300px; height: 300px; border: 1px solid black;"
+        style={`width: ${X_RES * 2}px; height: ${Y_RES * 2}px; border: 1px solid black;`}
         ref={mainScreenCanvas}
       />
       <canvas
-        style={`width: ${16 * 8 * 2}px; height: ${32 * 8 * 2}px; border: 1px solid black;`}
+        style={`width: ${DEBUG_X_RES * 2}px; height: ${DEBUG_Y_RES * 2}px; border: 1px solid black;`}
         ref={debugScreenCanvas}
       />
       <input type="file" onChange={handleFileSelection}></input>
