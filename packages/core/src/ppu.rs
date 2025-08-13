@@ -12,7 +12,7 @@ static Y_RES: usize = 144;
 static X_RES: usize = 160;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct RGBA {
     r: u8,
     g: u8,
@@ -26,9 +26,11 @@ impl RGBA {
     }
 }
 
+static EMPTY_COLOR: RGBA = RGBA::new(0xFF, 0xFF, 0xFF, 0xFF);
+
 /* R G B A */
 static TILE_COLORS: [RGBA; 4] = [
-    RGBA::new(0xFF, 0xFF, 0xFF, 0xFF),
+    EMPTY_COLOR,
     RGBA::new(0xAA, 0xAA, 0xAA, 0xFF),
     RGBA::new(0x55, 0x55, 0x55, 0xFF),
     RGBA::new(0x00, 0x00, 0x00, 0xFF),
@@ -76,6 +78,8 @@ pub struct PPU {
     pub dma: DMA,
     pub lcd: LCD,
     pfc: PixelFIFOContext,
+
+    debug: Option<usize>,
 }
 
 impl PPU {
@@ -93,6 +97,8 @@ impl PPU {
             dma: DMA::new(),
             lcd: LCD::new(),
             pfc: PixelFIFOContext::new(),
+
+            debug: None,
         }
     }
 
@@ -137,7 +143,11 @@ impl PPU {
     {
         self.line_ticks += 1;
 
-        println!("line_ticks={:X?} mode={:?}", self.line_ticks, self.lcd.get_ppu_mode());
+        // println!(
+        //     "line_ticks={:X?} mode={:?}",
+        //     self.line_ticks,
+        //     self.lcd.get_ppu_mode()
+        // );
 
         match self.lcd.get_ppu_mode() {
             PPUMode::HBlank => {
@@ -180,7 +190,10 @@ impl PPU {
                 }
             }
             PPUMode::Drawing => {
-                println!("  drawing {:?} {:?}", self.pfc.fetch_state, self.pfc.pushed_x);
+                // println!(
+                //     "  drawing {:?} {:?}",
+                //     self.pfc.fetch_state, self.pfc.pushed_x
+                // );
                 self.pipeline_process();
                 if self.pfc.pushed_x as usize >= X_RES {
                     self.pipeline_reset();
@@ -199,49 +212,60 @@ impl PPU {
         if self.line_ticks & 1 == 0 {
             match self.pfc.fetch_state {
                 FetchState::Tile => {
-                    let (map_x, map_y) = if self.lcd.is_bg_window_enabled() {
-                        let map_y = ((self.lcd.ly as u16 + self.lcd.scroll_y as u16) / 8) as u8;
-                        let map_x = ((self.pfc.fetch_x as u16 + self.lcd.scroll_x as u16) / 8) as u8;
-                        (map_x, map_y)
+                    // TODO window
+                    // background
+                    let address = if self.lcd.is_bg_window_enabled() {
+                        let map_x =
+                            ((self.lcd.scroll_x / 8).overflowing_add(self.pfc.fetch_x)).0 & 0x1F;
+                        let map_y = self.lcd.ly.overflowing_add(self.lcd.scroll_y).0 >> 3;
+                        let tile_y = self.lcd.ly.overflowing_add(self.lcd.scroll_y).0 & 0x7;
+                        let tile_map_start = self.lcd.get_bg_tile_map_start();
+                        let tile_idx =
+                            self.vram_read(tile_map_start + map_x as u16 + map_y as u16 * 32);
+                        let address = self.lcd.get_bg_window_tile_data_address(
+                            tile_idx as u16 * 16 + tile_y as u16 * 2,
+                        );
+                        Some(address)
                     } else {
-                        (0, 0) // TOD disable
+                        None
                     };
-                    let start = *self.lcd.get_bg_tile_map_area().start() as u16;
-                    let tile_idx = self.vram_read(start + map_x as u16 + map_y as u16 * 32);
-                    self.pfc.fetch_state = FetchState::Data0(tile_idx);
-                    self.pfc.fetch_x += 8;
+                    self.pfc.fetch_state = FetchState::Data0(address);
+                    // println!("fetch_x: {:?} push_x: {:?} fifo_len: {:?}", self.pfc.fetch_x, self.pfc.pushed_x, self.pfc.pixel_fifo.len());
+                    self.pfc.fetch_x += 1;
                 }
-                FetchState::Data0(tile_idx) => {
-                    let start = *self.lcd.get_bg_window_tile_data_area().start() as u16;
-                    let tile_y = ((self.lcd.ly as u16 + self.lcd.scroll_y as u16) % 8) as u8 * 2;
-                    let data0 = self.vram_read(start + tile_idx as u16 * 16 + tile_y as u16);
-                    self.pfc.fetch_state = FetchState::Data1(tile_idx, data0);
+                FetchState::Data0(address) => {
+                    self.pfc.fetch_state = FetchState::Data1(match address {
+                        None => None,
+                        Some(address) => Some((address, self.vram_read(address))),
+                    });
                 }
-                FetchState::Data1(tile_idx, data0) => {
-                    let start = *self.lcd.get_bg_window_tile_data_area().start() as u16;
-                    let tile_y = ((self.lcd.ly as u16 + self.lcd.scroll_y as u16) % 8) as u8 * 2;
-                    let data1 = self.vram_read(start + tile_idx as u16 * 16 + tile_y as u16 + 1);
-                    self.pfc.fetch_state = FetchState::Idle(data0, data1);
+                FetchState::Data1(args) => {
+                    self.pfc.fetch_state = FetchState::Idle(match args {
+                        None => None,
+                        Some((address, data0)) => {
+                            Some((address, data0, self.vram_read(address + 1)))
+                        }
+                    });
                 }
-                FetchState::Idle(data0, data1) => {
-                    self.pfc.fetch_state = FetchState::Push(data0, data1);
+                FetchState::Idle(args) => {
+                    self.pfc.fetch_state = FetchState::Push(args);
                 }
-                FetchState::Push(data0, data1) => {
+                FetchState::Push(args) => {
                     if self.pfc.pixel_fifo.len() > 8 {
-                        return
+                        return;
                     }
-                    let x = self.pfc.fetch_x as i32 - (8 - (self.lcd.scroll_x as i32 % 8));
-
                     for i in 0..8 {
                         let bit = 7 - i;
-                        let hi = data0 >> bit & 1;
-                        let lo = (data1 >> bit & 1) << 1;
-                        let color = &self.lcd.bg_colors[hi as usize | lo as usize];
-
-                        if x >= 0 {
-                            self.pfc.pixel_fifo.push(color.clone());
-                            self.pfc.fifo_x += 1;
-                        }
+                        let color = match args {
+                            None => &EMPTY_COLOR,
+                            Some((address, data0, data1)) => {
+                                let lo = data0 >> bit & 1;
+                                let hi = (data1 >> bit & 1) << 1;
+                                &self.lcd.bg_colors[hi as usize | lo as usize]
+                            }
+                        };
+                        self.pfc.pixel_fifo.push(color.clone());
+                        // self.pfc.fifo_x += 1;
                     }
 
                     self.pfc.fetch_state = FetchState::Tile;
@@ -251,16 +275,16 @@ impl PPU {
         if self.pfc.pixel_fifo.len() > 8 {
             let pixel = self.pfc.pixel_fifo.pop().unwrap();
 
-            if self.pfc.line_x >= (self.lcd.scroll_x % 8) {
-                let idx: usize = (self.pfc.pushed_x as usize + self.lcd.ly as usize * X_RES) * 4;
-                if let Some(screen_writer) = &mut self.screen_writer {
-                    screen_writer.set_index(idx + 0 , pixel.r);
-                    screen_writer.set_index(idx + 1 , pixel.g);
-                    screen_writer.set_index(idx + 2 , pixel.b);
-                    screen_writer.set_index(idx + 3 , pixel.a);
-                }
-                self.pfc.pushed_x += 1;
+            // if self.pfc.line_x >= (self.lcd.scroll_x % 8) {
+            let idx: usize = (self.pfc.pushed_x as usize + self.lcd.ly as usize * X_RES) * 4;
+            if let Some(screen_writer) = &mut self.screen_writer {
+                screen_writer.set_index(idx + 0, pixel.r);
+                screen_writer.set_index(idx + 1, pixel.g);
+                screen_writer.set_index(idx + 2, pixel.b);
+                screen_writer.set_index(idx + 3, pixel.a);
             }
+            self.pfc.pushed_x += 1;
+            // }
         }
     }
 
@@ -272,6 +296,9 @@ impl PPU {
         if self.dma.active {
             return 0xFF;
         }
+        if let PPUMode::Drawing | PPUMode::OAMScan = self.lcd.get_ppu_mode() {
+            return 0xFF;
+        }
         let address = address - 0xFE00;
         self.oam_ram[address as usize]
     }
@@ -280,19 +307,30 @@ impl PPU {
         if self.dma.active {
             return;
         }
+        if let PPUMode::Drawing | PPUMode::OAMScan = self.lcd.get_ppu_mode() {
+            return;
+        }
         let address = address - 0xFE00;
         self.oam_ram[address as usize] = value;
     }
 
     pub fn vram_read(&self, address: u16) -> u8 {
+        // if let PPUMode::Drawing = self.lcd.get_ppu_mode() {
+        //     return 0xFF;
+        // }
         let address = address - 0x8000;
         self.vram[address as usize]
     }
 
     pub fn vram_write(&mut self, address: u16, value: u8) {
+        // if let PPUMode::Drawing = self.lcd.get_ppu_mode() {
+        //     return;
+        // }
         let address = address - 0x8000;
         self.vram[address as usize] = value;
-        self.write_to_debug_screen(address);
+        if address < 0x1800 {
+            self.write_to_debug_screen(address);
+        }
     }
 
     pub fn registers_read(&self, address: u16) -> u8 {
@@ -474,11 +512,11 @@ impl LCD {
     }
 
     #[inline]
-    pub fn get_window_tile_map_area(&self) -> RangeInclusive<usize> {
+    pub fn get_window_tile_map_start(&self) -> u16 {
         if bit!(self.control, 6) {
-            0x9C00..=0x9FFF
+            0x9C00
         } else {
-            0x9800..=0x9BFF
+            0x9800
         }
     }
 
@@ -488,20 +526,20 @@ impl LCD {
     }
 
     #[inline]
-    pub fn get_bg_window_tile_data_area(&self) -> RangeInclusive<usize> {
+    pub fn get_bg_window_tile_data_address(&self, address: u16) -> u16 {
         if bit!(self.control, 4) {
-            0x8000..=0x8FFF
+            0x8000 + address
         } else {
-            0x8800..=0x97FF
+            0x8800 + ((address + 0x800) % 0x1000)
         }
     }
 
     #[inline]
-    pub fn get_bg_tile_map_area(&self) -> RangeInclusive<usize> {
+    pub fn get_bg_tile_map_start(&self) -> u16 {
         if bit!(self.control, 3) {
-            0x9C00..=0x9FFF
+            0x9C00
         } else {
-            0x9800..=0x9BFF
+            0x9800
         }
     }
 
@@ -580,10 +618,10 @@ impl LCD {
 #[derive(Debug)]
 enum FetchState {
     Tile,
-    Data0(u8),
-    Data1(u8, u8),
-    Idle(u8, u8),
-    Push(u8, u8),
+    Data0(Option<u16>),
+    Data1(Option<(u16, u8)>),
+    Idle(Option<(u16, u8, u8)>),
+    Push(Option<(u16, u8, u8)>),
 }
 
 struct PixelFIFOContext {
