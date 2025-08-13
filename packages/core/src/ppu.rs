@@ -127,6 +127,9 @@ impl PPU {
     where
         RequestInt: FnMut(InterruptKind),
     {
+        if self.lcd.is_window_visible() && self.lcd.window_y <= self.lcd.ly {
+            self.lcd.window_line += 1;
+        }
         self.lcd.ly += 1;
 
         let lyc_equals_ly = self.lcd.ly == self.lcd.ly_compare;
@@ -167,6 +170,9 @@ impl PPU {
                         // TODO FPS
                     } else {
                         self.lcd.set_ppu_mode(PPUMode::OAMScan);
+                        if self.lcd.is_mode2_int_selected() {
+                            request_interrupt(InterruptKind::LCDStat)
+                        }
                     }
                     self.line_ticks = 0;
                 }
@@ -176,7 +182,11 @@ impl PPU {
                     self.increment_ly(request_interrupt);
                     if self.lcd.ly as usize >= LINES_PER_FRAME {
                         self.lcd.set_ppu_mode(PPUMode::OAMScan);
+                        if self.lcd.is_mode2_int_selected() {
+                            request_interrupt(InterruptKind::LCDStat)
+                        }
                         self.lcd.ly = 0;
+                        self.lcd.window_line = 0;
                     }
                     self.line_ticks = 0;
                 }
@@ -212,20 +222,36 @@ impl PPU {
         if self.line_ticks & 1 == 0 {
             match self.pfc.fetch_state {
                 FetchState::Tile => {
-                    // TODO window
-                    // background
+                    // background & window
                     let address = if self.lcd.is_bg_window_enabled() {
-                        let map_x =
-                            ((self.lcd.scroll_x / 8).overflowing_add(self.pfc.fetch_x)).0 & 0x1F;
-                        let map_y = self.lcd.ly.overflowing_add(self.lcd.scroll_y).0 >> 3;
-                        let tile_y = self.lcd.ly.overflowing_add(self.lcd.scroll_y).0 & 0x7;
-                        let tile_map_start = self.lcd.get_bg_tile_map_start();
-                        let tile_idx =
-                            self.vram_read(tile_map_start + map_x as u16 + map_y as u16 * 32);
-                        let address = self.lcd.get_bg_window_tile_data_address(
-                            tile_idx as u16 * 16 + tile_y as u16 * 2,
-                        );
-                        Some(address)
+                        let inside_window = self.lcd.is_window_visible()
+                            && self.lcd.window_x <= self.pfc.fetch_x * 8 + 7
+                            && self.lcd.window_y <= self.lcd.ly;
+                        Some(if inside_window {
+                            let map_x = ((self.pfc.fetch_x * 8 + 7) - self.lcd.window_x) / 8;
+                            let map_y = self.lcd.window_line >> 3;
+                            let tile_y = self.lcd.window_line & 0x7;
+                            let tile_map_start = self.lcd.get_window_tile_map_start();
+                            let tile_idx =
+                                self.vram_read(tile_map_start + map_x as u16 + map_y as u16 * 32);
+                            let address = self.lcd.get_bg_window_tile_data_address(
+                                tile_idx as u16 * 16 + tile_y as u16 * 2,
+                            );
+                            address
+                        } else {
+                            let map_x = ((self.lcd.scroll_x / 8).overflowing_add(self.pfc.fetch_x))
+                                .0
+                                & 0x1F;
+                            let map_y = self.lcd.ly.overflowing_add(self.lcd.scroll_y).0 >> 3;
+                            let tile_y = self.lcd.ly.overflowing_add(self.lcd.scroll_y).0 & 0x7;
+                            let tile_map_start = self.lcd.get_bg_tile_map_start();
+                            let tile_idx =
+                                self.vram_read(tile_map_start + map_x as u16 + map_y as u16 * 32);
+                            let address = self.lcd.get_bg_window_tile_data_address(
+                                tile_idx as u16 * 16 + tile_y as u16 * 2,
+                            );
+                            address
+                        })
                     } else {
                         None
                     };
@@ -470,6 +496,7 @@ pub struct LCD {
     obj_palette: [u8; 2],
     window_y: u8,
     window_x: u8,
+    window_line: u8,
 
     bg_colors: [RGBA; 4],
     sp1_colors: [RGBA; 4],
@@ -497,6 +524,7 @@ impl LCD {
             obj_palette: [0xFF, 0xFF],
             window_y: 0,
             window_x: 0,
+            window_line: 0,
 
             bg_colors: TILE_COLORS.clone(),
             sp1_colors: TILE_COLORS.clone(),
@@ -523,6 +551,14 @@ impl LCD {
     #[inline]
     pub fn is_window_enabled(&self) -> bool {
         bit!(self.control, 5)
+    }
+
+    #[inline]
+    pub fn is_window_visible(&self) -> bool {
+        self.is_bg_window_enabled()
+            && self.is_window_enabled()
+            && (0..=166).contains(&self.window_x)
+            && (0..=143).contains(&self.window_y)
     }
 
     #[inline]

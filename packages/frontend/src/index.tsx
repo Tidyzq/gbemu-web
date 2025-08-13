@@ -3,8 +3,10 @@ import { render } from "solid-js/web";
 const Y_RES = 144;
 const X_RES = 160;
 
-const DEBUG_Y_RES = 32 * 8;
+const DEBUG_Y_RES = 3 * 8 * 8;
 const DEBUG_X_RES = 16 * 8;
+
+const SCALE = 2;
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url));
 
@@ -79,11 +81,11 @@ const Emu = () => {
   return (
     <>
       <canvas
-        style={`width: ${X_RES * 2}px; height: ${Y_RES * 2}px; border: 1px solid black;`}
+        style={`width: ${X_RES * SCALE}px; height: ${Y_RES * SCALE}px; border: 1px solid black;`}
         ref={mainScreenCanvas}
       />
       <canvas
-        style={`width: ${DEBUG_X_RES * 2}px; height: ${DEBUG_Y_RES * 2}px; border: 1px solid black;`}
+        style={`width: ${DEBUG_X_RES * SCALE}px; height: ${DEBUG_Y_RES * SCALE}px; border: 1px solid black;`}
         ref={debugScreenCanvas}
       />
       <input type="file" onChange={handleFileSelection}></input>
